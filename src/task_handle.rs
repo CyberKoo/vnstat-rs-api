@@ -2,11 +2,11 @@ use anyhow::{anyhow, bail, Context, Result};
 use log::{debug, error, trace, warn};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::broadcast::Sender;
-use tokio::sync::{broadcast, OnceCell};
+use tokio::sync::broadcast::{self, Sender};
 use tokio_util::sync::CancellationToken;
 
 pub type Output = String;
@@ -15,68 +15,110 @@ pub type Output = String;
 #[allow(dead_code)]
 pub enum TaskMessage {
     Data(Output),
-    Comment(Output),
     Error(Output),
     Eof,
 }
 
+/// Internal state protected by a single mutex to guarantee atomicity
+/// across ref_count changes and token lifecycle.
+#[derive(Default)]
+struct State {
+    /// Number of current subscribers.
+    ref_count: usize,
+    /// Cancellation token for the running process (if any).
+    cancel_token: Option<CancellationToken>,
+}
+
 pub struct TaskHandle {
-    spawned: AtomicBool,
-    ref_count: AtomicUsize,
     tx: Sender<TaskMessage>,
-    cancel_token: OnceCell<CancellationToken>,
+    state: Arc<Mutex<State>>,
 }
 
 impl TaskHandle {
+    /// Create a new task handle.
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(100);
-
         Self {
             tx,
-            cancel_token: OnceCell::new(),
-            ref_count: AtomicUsize::new(0),
-            spawned: AtomicBool::new(false),
+            state: Arc::new(Mutex::new(State::default())),
         }
     }
 
-    pub async fn subscribe(self: &Self, cmd: Vec<String>) -> broadcast::Receiver<TaskMessage> {
-        // 原子性增加引用计数
-        let old_count = self.ref_count.fetch_add(1, Ordering::AcqRel);
+    /// Subscribe to the task output.
+    ///
+    /// If this is the first subscriber (ref_count moves 0 -> 1) and there is
+    /// no running process (no cancel_token), a new CancellationToken is created
+    /// and stored atomically and a process will be spawned outside the lock.
+    pub async fn subscribe(
+        &self,
+        cmd: Vec<String>,
+    ) -> tokio::sync::broadcast::Receiver<TaskMessage> {
+        // Decide whether to spawn outside the critical section to avoid long hold times.
+        let mut need_spawn: Option<(Vec<String>, CancellationToken)> = None;
 
-        // 如果是第一个订阅者且还未spawn，则spawn
-        if old_count == 0 && !self.spawned.swap(true, Ordering::AcqRel) {
-            match self.spawn_process(cmd).await {
-                Ok(token) => {
-                    self.cancel_token.set(token).ok();
-                    debug!("Cancel token stored after spawn process");
-                }
-                Err(error) => {
-                    error!("Spawn task failed!!! Error: {}", error);
-                    TaskHandle::broadcast(
-                        &self.tx,
-                        TaskMessage::Error("Spawn task failed".to_string()),
-                    );
-                }
+        {
+            let mut st = self.state.lock().expect("TaskHandle.state mutex poisoned");
+            st.ref_count += 1;
+
+            // First subscriber and no running process: prepare to spawn.
+            if st.ref_count == 1 && st.cancel_token.is_none() {
+                let token = CancellationToken::new();
+                st.cancel_token = Some(token.clone());
+                need_spawn = Some((cmd.clone(), token));
+            }
+        }
+
+        if let Some((cmd_to_spawn, token)) = need_spawn {
+            if let Err(error) = self.spawn_process(cmd_to_spawn, token.clone()) {
+                error!("Spawn task failed! Error: {}", error);
+                TaskHandle::broadcast(
+                    &self.tx,
+                    TaskMessage::Error("Spawn task failed".to_string()),
+                );
+
+                // Roll back token to allow future retries.
+                let mut st = self.state.lock().expect("TaskHandle.state mutex poisoned");
+                st.cancel_token = None;
+            } else {
+                debug!("Cancel token stored and process spawned");
             }
         }
 
         self.tx.subscribe()
     }
 
-    pub fn unsubscribe(self: &Self) {
-        let old_count = self.ref_count.fetch_sub(1, Ordering::AcqRel);
-        if old_count == 1 {
-            if let Some(token) = self.cancel_token.get() {
-                token.cancel();
-            }
+    /// Unsubscribe from the task output.
+    ///
+    /// When the last subscriber unsubscribes (ref_count moves 1 -> 0),
+    /// we take the token (atomically) and cancel outside the lock.
+    pub fn unsubscribe(&self) {
+        let token_to_cancel = {
+            let mut st = self.state.lock().expect("TaskHandle.state mutex poisoned");
 
-            self.spawned.store(false, Ordering::Release);
+            if st.ref_count == 0 {
+                warn!("unsubscribe called with ref_count == 0");
+                None
+            } else {
+                st.ref_count -= 1;
+                if st.ref_count == 0 {
+                    st.cancel_token.take()
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(token) = token_to_cancel {
+            token.cancel();
         }
     }
 
-    pub async fn spawn_process(self: &Self, cmd: Vec<String>) -> Result<CancellationToken> {
-        let cancel_token = CancellationToken::new();
-
+    /// Spawn the child process and a background task to forward its output.
+    ///
+    /// This function assumes the provided token has already been stored in state
+    /// under the mutex. It does not touch ref_count or the token storage; it only
+    /// uses the token to observe cancellation.
+    fn spawn_process(&self, cmd: Vec<String>, cancel_token: CancellationToken) -> Result<()> {
         if cmd.is_empty() {
             bail!("spawn_process called with empty cmd, skipping spawn.");
         }
@@ -84,12 +126,11 @@ impl TaskHandle {
         let program = cmd[0].clone();
         let args = cmd[1..].to_vec();
 
-        trace!("Spawning process: {} {:?}", program, args);
+        trace!("Spawning process: {} {:?}", &program, &args);
 
-        // 用 context 包裹错误信息
         let mut child = Command::new(&program)
             .args(&args)
-            .stdout(std::process::Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .with_context(|| format!("Failed to spawn child process: {} {:?}", program, args))?;
 
@@ -101,8 +142,9 @@ impl TaskHandle {
         let tx = self.tx.clone();
         let mut reader = BufReader::new(stdout).lines();
         let cancel_token_clone = cancel_token.clone();
+        let state = Arc::clone(&self.state);
 
-        // 进程输出处理还是放到后台任务
+        // Background task: forward output lines, handle cancellation, clean up token on exit.
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -125,17 +167,24 @@ impl TaskHandle {
                             }
                             Err(e) => {
                                 error!("Read error from process {:?}: {}", cmd, e);
-                                TaskHandle::broadcast(&tx, TaskMessage::Error(format!("Failed to read line from process: {:?}, err: {}", cmd, e)));
+                                TaskHandle::broadcast(&tx, TaskMessage::Error(format!(
+                                    "Failed to read line from process: {:?}, err: {}", cmd, e
+                                )));
                                 break;
                             }
                         }
                     }
                 }
             }
+
             trace!("Process handler exited: {:?}", cmd);
+
+            // Clean up token after the process ends, enabling next 0->1 transition to spawn again.
+            let mut st = state.lock().expect("TaskHandle.state mutex poisoned");
+            st.cancel_token = None;
         });
 
-        Ok(cancel_token)
+        Ok(())
     }
 
     fn broadcast<T>(tx: &Sender<T>, msg: T) {
@@ -150,6 +199,7 @@ pub struct TaskDropGuard {
 }
 
 impl TaskDropGuard {
+    /// Create a guard that runs the provided async cleanup function on drop.
     pub fn new<F, Fut>(cleanup_fn: F) -> Self
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -164,7 +214,7 @@ impl TaskDropGuard {
 impl Drop for TaskDropGuard {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
-            // fire-and-forget
+            // Fire-and-forget cleanup.
             tokio::spawn(cleanup());
         }
     }

@@ -86,7 +86,6 @@ pub async fn stream_interface_live_stats(
             match receiver.recv().await {
                 Ok(message) => match message {
                     TaskMessage::Data(data) => yield Ok(Event::default().data(data).id(timestamp::get_in_ms().to_string())),
-                    TaskMessage::Comment(comment) => yield Ok(Event::default().comment(comment)),
                     TaskMessage::Error(error) => yield Err(error),
                     TaskMessage::Eof => break
                 },
