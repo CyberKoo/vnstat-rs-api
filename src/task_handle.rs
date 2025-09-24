@@ -3,7 +3,6 @@ use log::{debug, error, trace, warn};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::broadcast::Sender;
@@ -16,22 +15,22 @@ pub type Output = String;
 #[allow(dead_code)]
 pub enum TaskMessage {
     Data(Output),
-    Event(Output),
     Comment(Output),
     Error(Output),
     Eof,
 }
 
 pub struct TaskHandle {
+    spawned: AtomicBool,
+    ref_count: AtomicUsize,
     tx: Sender<TaskMessage>,
     cancel_token: OnceCell<CancellationToken>,
-    ref_count: AtomicUsize,
-    spawned: AtomicBool,
 }
 
 impl TaskHandle {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(100);
+
         Self {
             tx,
             cancel_token: OnceCell::new(),
@@ -40,23 +39,23 @@ impl TaskHandle {
         }
     }
 
-    pub async fn subscribe(self: &Arc<Self>, cmd: Vec<String>) -> broadcast::Receiver<TaskMessage> {
+    pub async fn subscribe(self: &Self, cmd: Vec<String>) -> broadcast::Receiver<TaskMessage> {
         // 原子性增加引用计数
         let old_count = self.ref_count.fetch_add(1, Ordering::AcqRel);
 
         // 如果是第一个订阅者且还未spawn，则spawn
         if old_count == 0 && !self.spawned.swap(true, Ordering::AcqRel) {
-            let cmd_clone = cmd.clone();
-            let tx = self.tx.clone();
-
-            match self.spawn_process(cmd_clone).await {
+            match self.spawn_process(cmd).await {
                 Ok(token) => {
                     self.cancel_token.set(token).ok();
                     debug!("Cancel token stored after spawn process");
                 }
                 Err(error) => {
                     error!("Spawn task failed!!! Error: {}", error);
-                    TaskHandle::broadcast(&tx, TaskMessage::Error("Spawn task failed".to_string()));
+                    TaskHandle::broadcast(
+                        &self.tx,
+                        TaskMessage::Error("Spawn task failed".to_string()),
+                    );
                 }
             }
         }
@@ -64,7 +63,7 @@ impl TaskHandle {
         self.tx.subscribe()
     }
 
-    pub fn unsubscribe(self: &Arc<Self>) {
+    pub fn unsubscribe(self: &Self) {
         let old_count = self.ref_count.fetch_sub(1, Ordering::AcqRel);
         if old_count == 1 {
             if let Some(token) = self.cancel_token.get() {
@@ -75,8 +74,7 @@ impl TaskHandle {
         }
     }
 
-    pub async fn spawn_process(self: &Arc<Self>, cmd: Vec<String>) -> Result<CancellationToken> {
-        let tx = self.tx.clone();
+    pub async fn spawn_process(self: &Self, cmd: Vec<String>) -> Result<CancellationToken> {
         let cancel_token = CancellationToken::new();
 
         if cmd.is_empty() {
@@ -86,20 +84,21 @@ impl TaskHandle {
         let program = cmd[0].clone();
         let args = cmd[1..].to_vec();
 
-        trace!("Spawning process: {:?} {:?}", program, args);
+        trace!("Spawning process: {} {:?}", program, args);
 
         // 用 context 包裹错误信息
         let mut child = Command::new(&program)
             .args(&args)
             .stdout(std::process::Stdio::piped())
             .spawn()
-            .with_context(|| format!("Failed to spawn child process: {:?} {:?}", program, args))?;
+            .with_context(|| format!("Failed to spawn child process: {} {:?}", program, args))?;
 
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| anyhow!("Failed to take stdout of process: {:?}", cmd))?;
 
+        let tx = self.tx.clone();
         let mut reader = BufReader::new(stdout).lines();
         let cancel_token_clone = cancel_token.clone();
 
@@ -141,7 +140,7 @@ impl TaskHandle {
 
     fn broadcast<T>(tx: &Sender<T>, msg: T) {
         if let Err(e) = tx.send(msg) {
-            warn!("broadcast send failed: {:?}", e.to_string());
+            warn!("broadcast failed: {:?}", e.to_string());
         }
     }
 }

@@ -1,6 +1,7 @@
 use crate::model::vnstat::{Interface, VnstatData};
 use crate::task_handle::TaskMessage;
 use crate::task_manager::TaskManager;
+use crate::utils::timestamp;
 use anyhow::{Context, Result};
 use async_stream::stream;
 use axum::response::sse::Event;
@@ -84,8 +85,7 @@ pub async fn stream_interface_live_stats(
         loop {
             match receiver.recv().await {
                 Ok(message) => match message {
-                    TaskMessage::Data(data) => yield Ok(Event::default().data(data)),
-                    TaskMessage::Event(event) => yield Ok(Event::default().event(event)),
+                    TaskMessage::Data(data) => yield Ok(Event::default().data(data).id(timestamp::get_in_ms().to_string())),
                     TaskMessage::Comment(comment) => yield Ok(Event::default().comment(comment)),
                     TaskMessage::Error(error) => yield Err(error),
                     TaskMessage::Eof => break
