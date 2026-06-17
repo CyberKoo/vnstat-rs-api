@@ -1,9 +1,13 @@
 use clap::Parser;
 
+/// Command-line arguments for the vnstat-rs-api application.
+///
+/// Parsed from the command line using [`clap::Parser`]. Both `--config <FILE>` and
+/// `--debug` / `-d` are optional; sensible defaults are provided for each.
 #[derive(Parser, Debug)]
-#[command(name = env!("CARGO_PKG_DESCRIPTION"))] // Application name from Cargo metadata.
-#[command(author = env!("CARGO_PKG_AUTHORS"))] // Author(s) from Cargo metadata.
-#[command(version = env!("CARGO_PKG_VERSION"))] // Version from Cargo metadata.
+#[command(name = env!("CARGO_PKG_DESCRIPTION"))]
+#[command(author = env!("CARGO_PKG_AUTHORS"))]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(
     about = "A RESTful Web API wrapper for vnstat's network traffic monitoring.",
     long_about = "vnstat-rs-api: A Rust-based tool that converts vnstat's CLI into a RESTful API. \
