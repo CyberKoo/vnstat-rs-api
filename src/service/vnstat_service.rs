@@ -1,6 +1,5 @@
 use crate::model::vnstat::{Interface, VnstatData};
-use crate::task_handle::TaskMessage;
-use crate::task_manager::TaskManager;
+use crate::task_registry::{TaskMessage, TaskRegistry};
 use crate::utils::timestamp;
 use anyhow::{Context, Result};
 use async_stream::stream;
@@ -13,16 +12,14 @@ use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::warn;
 
-/// Timeout for vnstat command execution.
-const VNSTAT_TIMEOUT: Duration = Duration::from_secs(15);
-
 /// Service for interacting with the `vnstat` command-line tool.
 ///
-/// Encapsulates vnStat data fetching, interface listing, health checks, and
-/// live-traffic streaming. Uses a cached (1-entry, 60-second TTL) backend for
+/// Encapsulates vnStat data fetching, interface queries, health checks, and
+/// live-traffic streaming.  Uses a single-entry, 60-second TTL cache for
 /// periodic data queries to avoid redundant subprocess invocations.
 pub struct VnstatService {
     executable: String,
+    timeout: Duration,
 }
 
 impl VnstatService {
@@ -30,75 +27,45 @@ impl VnstatService {
     ///
     /// # Arguments
     ///
-    /// * `executable` - Path or name of the `vnstat` binary (e.g. `"vnstat"`).
-    ///
-    /// # Returns
-    ///
-    /// A new `VnstatService` instance that will delegate all vnStat calls to
-    /// the given executable.
-    pub fn new(executable: impl Into<String>) -> Self {
+    /// * `executable` - Path or name of the `vnstat` binary.
+    /// * `timeout_secs` - Timeout in seconds for vnstat subprocess execution.
+    pub fn new(executable: impl Into<String>, timeout_secs: u64) -> Self {
         Self {
             executable: executable.into(),
+            timeout: Duration::from_secs(timeout_secs),
         }
     }
 
-    /// Fetches the full vnStat data JSON.
+    /// Fetches the full vnStat data JSON (cached for 60 seconds).
     ///
-    /// This is a public convenience wrapper around the cached free function
-    /// [`fetch_vnstat_data_cached`], using the service's configured
-    /// executable path as the cache key.
-    ///
-    /// # Returns
-    ///
-    /// A [`VnstatData`] struct deserialized from the `vnstat --json` output.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the vnStat subprocess fails, times out, produces
-    /// invalid UTF-8, or returns JSON that cannot be deserialized.
+    /// Delegates to the cached free function [`fetch_vnstat_data_cached`].
     pub async fn fetch_vnstat_data(&self) -> Result<VnstatData> {
-        fetch_vnstat_data_cached(self.executable.clone()).await
+        fetch_vnstat_data_cached(self.executable.clone(), self.timeout).await
     }
 
-    /// Lists all network interfaces tracked by vnStat.
-    ///
-    /// # Returns
-    ///
-    /// A `Vec<String>` containing the names of every interface present in
-    /// the vnStat database.
+    /// Returns a list of all network interface names tracked by vnStat.
+    pub async fn list_interfaces(&self) -> Result<Vec<String>> {
+        let data = self.fetch_vnstat_data().await?;
+        Ok(data.interfaces.iter().map(|i| i.name.clone()).collect())
+    }
+
+    /// Returns traffic statistics for a single interface.
     ///
     /// # Errors
     ///
-    /// Propagates any error from [`fetch_vnstat_data`](Self::fetch_vnstat_data).
-    pub async fn list_vnstat_interfaces(&self) -> Result<Vec<String>> {
+    /// Returns an error if the interface is not found or the data fetch fails.
+    pub async fn get_interface(&self, if_name: &str) -> Result<Interface> {
         let data = self.fetch_vnstat_data().await?;
-        let interfaces: Vec<_> = data.interfaces.iter().map(|i| i.name.clone()).collect();
-
-        Ok(interfaces)
-    }
-
-    /// Retrieves detailed statistics for a specific network interface.
-    ///
-    /// # Arguments
-    ///
-    /// * `if_name` - Name of the interface to look up (e.g. `"eth0"`).
-    ///
-    /// # Returns
-    ///
-    /// The [`Interface`] struct matching the requested interface name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the interface is not found in the vnStat data, or
-    /// if the underlying data fetch fails.
-    pub async fn fetch_interface_stats(&self, if_name: impl AsRef<str>) -> Result<Interface> {
-        let data = self.fetch_vnstat_data().await?;
-
         data.interfaces
-            .iter()
-            .find(|i| i.name == if_name.as_ref())
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("interface not found"))
+            .into_iter()
+            .find(|i| i.name == if_name)
+            .ok_or_else(|| anyhow::anyhow!("interface not found: {}", if_name))
+    }
+
+    /// Returns the vnStat version string.
+    pub async fn get_vnstat_version(&self) -> Result<String> {
+        let data = self.fetch_vnstat_data().await?;
+        Ok(data.vnstatversion)
     }
 
     /// Performs a quick health check by running `vnstat --json`.
@@ -111,9 +78,9 @@ impl VnstatService {
     /// # Errors
     ///
     /// Returns an error if the vnStat subprocess fails, exits with a non-zero
-    /// status code, or does not complete within [`VNSTAT_TIMEOUT`].
+    /// status code, or does not complete within the configured timeout.
     pub async fn check_health(&self) -> Result<()> {
-        tokio::time::timeout(VNSTAT_TIMEOUT, async {
+        tokio::time::timeout(self.timeout, async {
             let output = tokio::process::Command::new(&self.executable)
                 .arg("--json")
                 .output()
@@ -135,22 +102,6 @@ impl VnstatService {
 
     /// Builds the command-line arguments required to start a live-traffic
     /// stream for a given interface.
-    ///
-    /// The returned `Vec<String>` is suitable for spawning a long-running
-    /// `vnstat` process that emits JSON traffic updates.
-    ///
-    /// # Arguments
-    ///
-    /// * `if_name` - The network interface to monitor in real time.
-    ///
-    /// # Returns
-    ///
-    /// A vector of command tokens: `[executable, "-i", if_name, "--json", "-l"]`.
-    ///
-    /// # Errors
-    ///
-    /// This function currently never returns `Err`; the `Result` return type
-    /// is reserved for future validation.
     pub fn build_live_stream_command(&self, if_name: impl AsRef<str>) -> Result<Vec<String>> {
         Ok(vec![
             self.executable.clone(),
@@ -163,28 +114,9 @@ impl VnstatService {
 
     /// Returns a streaming response of Server-Sent Events (SSE) that yields
     /// live traffic statistics for the requested interface.
-    ///
-    /// The stream subscribes to a [`TaskManager`] channel that wraps a
-    /// long-running `vnstat -l` process. Each line of JSON output is emitted
-    /// as an SSE event with a millisecond-precision timestamp as the event ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `manager` - Shared [`TaskManager`] responsible for managing the
-    ///   underlying vnStat subprocess.
-    /// * `if_name` - The network interface to stream live data for.
-    ///
-    /// # Returns
-    ///
-    /// A pinned, boxed [`Stream`] producing `Result<Event, String>` items:
-    /// * `Ok(Event)` — a live-traffic data point (or a comment on message lag).
-    /// * `Err(String)` — an unrecoverable error from the vnStat subprocess.
-    ///
-    /// The stream ends when the subprocess terminates or the broadcast channel
-    /// is closed.
     pub async fn stream_interface_live_stats(
         &self,
-        manager: Arc<TaskManager>,
+        registry: Arc<TaskRegistry>,
         if_name: String,
     ) -> Pin<Box<dyn Stream<Item = Result<Event, String>> + Send>> {
         let cmd = match self.build_live_stream_command(&if_name) {
@@ -199,7 +131,7 @@ impl VnstatService {
         let stream_name = if_name.clone();
 
         Box::pin(stream! {
-            let (mut receiver, _guard) = manager.subscribe(if_name.clone(), cmd).await;
+            let (mut receiver, _guard) = registry.subscribe(if_name.clone(), cmd).await;
 
             loop {
                 match receiver.recv().await {
@@ -221,29 +153,21 @@ impl VnstatService {
 
 /// Fetches vnStat data with a single-entry, 60-second in-memory cache.
 ///
-/// The cache key is the executable path (constant at runtime), so repeated
-/// calls within the 60-second window return the cached result without
+/// The cache key is the executable path and timeout (both constant at runtime).
+/// Repeated calls within the 60-second window return the cached result without
 /// re-invoking the subprocess. The TTL refreshes on every cache hit.
-///
-/// # Arguments
-///
-/// * `executable` — Path or name of the `vnstat` binary.
-///
-/// # Returns
-///
-/// A [`VnstatData`] struct deserialized from the `vnstat --json` output.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// * The vnStat subprocess fails to start or returns a non-zero exit code.
-/// * The command times out after [`VNSTAT_TIMEOUT`].
+/// * The command times out.
 /// * The stdout is not valid UTF-8.
 /// * The JSON payload cannot be deserialized into [`VnstatData`].
 #[cached(max_size = 1, ttl = 60, refresh = true)]
-async fn fetch_vnstat_data_cached(executable: String) -> Result<VnstatData> {
-    let output = tokio::time::timeout(VNSTAT_TIMEOUT, async {
-        tokio::process::Command::new(&executable)
+async fn fetch_vnstat_data_cached(executable: String, timeout: Duration) -> Result<VnstatData> {
+    let output = tokio::time::timeout(timeout, async {
+        tokio::process::Command::new(executable)
             .arg("--json")
             .output()
             .await

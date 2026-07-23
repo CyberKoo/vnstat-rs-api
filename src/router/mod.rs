@@ -1,6 +1,7 @@
 use crate::service::vnstat_service::VnstatService;
-use crate::task_manager::TaskManager;
+use crate::task_registry::TaskRegistry;
 use axum::Router;
+use axum::routing::get;
 use std::sync::Arc;
 
 mod vnstat;
@@ -16,15 +17,18 @@ pub struct AppState {
     /// underlying `vnstat` daemon.
     pub vnstat: Arc<VnstatService>,
 
-    /// Manager that controls the lifecycle of background tasks such as
-    /// SSE keep-alive watchers.
-    pub task_manager: Arc<TaskManager>,
+    /// Registry of named subprocesses whose output is broadcast to
+    /// multiple subscribers (used for SSE live streams).
+    pub task_registry: Arc<TaskRegistry>,
 }
 
 /// Assembles the top-level Axum [`Router`] and returns it.
 ///
-/// All routes are prefixed under `/vnstat` and delegate to the sub-module
-/// [`vnstat::router`].
+/// Service-level endpoints (`/health`, `/version`) are registered directly.
+/// Interface-related routes live under `/interfaces`.
 pub fn get_router() -> Router<AppState> {
-    Router::new().nest("/vnstat", vnstat::router())
+    Router::new()
+        .route("/health", get(vnstat::get_health))
+        .route("/version", get(vnstat::get_version))
+        .nest("/interfaces", vnstat::interfaces_router())
 }

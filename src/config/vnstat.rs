@@ -5,12 +5,15 @@ use std::path::Path;
 
 /// Configuration for the vnStat statistics backend.
 ///
-/// Controls the path to the vnStat binary that the application invokes to
-/// query network traffic statistics.
+/// Controls the path to the vnStat binary and the query timeout.
 #[derive(Debug, Deserialize)]
 pub struct VnstatConfig {
     #[serde(default = "default_executable")]
     pub executable: String,
+
+    /// Timeout in seconds for each vnstat query subprocess.
+    #[serde(default = "default_timeout")]
+    pub query_timeout_secs: u64,
 }
 
 impl ConfigEntity for VnstatConfig {
@@ -37,10 +40,11 @@ impl ConfigEntity for VnstatConfig {
 
 impl Default for VnstatConfig {
     /// Returns a `VnstatConfig` with the default executable path
-    /// (`/usr/bin/vnstat`).
+    /// (`/usr/bin/vnstat`) and default timeout (5s).
     fn default() -> Self {
         VnstatConfig {
             executable: default_executable(),
+            query_timeout_secs: default_timeout(),
         }
     }
 }
@@ -48,4 +52,9 @@ impl Default for VnstatConfig {
 /// Returns the default path to the vnStat executable (`/usr/bin/vnstat`).
 fn default_executable() -> String {
     "/usr/bin/vnstat".to_string()
+}
+
+/// Returns the default query timeout in seconds.
+fn default_timeout() -> u64 {
+    5
 }

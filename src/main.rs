@@ -19,8 +19,7 @@ mod logging;
 mod model;
 mod router;
 mod service;
-mod task_handle;
-mod task_manager;
+mod task_registry;
 mod utils;
 
 /// Entry point for the vnstat-rs API server.
@@ -52,12 +51,13 @@ async fn main() -> anyhow::Result<()> {
 
     let vnstat = Arc::new(service::vnstat_service::VnstatService::new(
         config.vnstat.executable,
+        config.vnstat.query_timeout_secs,
     ));
-    let task_manager = Arc::new(task_manager::TaskManager::new());
+    let task_registry = Arc::new(task_registry::TaskRegistry::new());
 
     let app_state = AppState {
         vnstat,
-        task_manager,
+        task_registry,
     };
 
     let app = Router::new()
@@ -80,13 +80,14 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Server listening on {}", listener.local_addr().unwrap());
 
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("server failed to start")?;
+    .await;
+
+    serve_result.context("server failed to start")?;
 
     info!("Server shut down gracefully");
 
@@ -139,7 +140,7 @@ fn build_cors_layer(cors_config: &config::cors::CorsConfig) -> CorsLayer {
         let methods: Vec<_> = cors_config
             .allowed_methods
             .iter()
-            .filter_map(|m| axum::http::Method::from_bytes(m.as_bytes()).ok())
+            .filter_map(|m: &String| axum::http::Method::from_bytes(m.as_bytes()).ok())
             .collect();
         layer = layer.allow_methods(AllowMethods::list(methods));
     }
@@ -151,7 +152,7 @@ fn build_cors_layer(cors_config: &config::cors::CorsConfig) -> CorsLayer {
         let headers: Vec<_> = cors_config
             .allowed_headers
             .iter()
-            .filter_map(|h| axum::http::HeaderName::from_bytes(h.as_bytes()).ok())
+            .filter_map(|h: &String| axum::http::HeaderName::from_bytes(h.as_bytes()).ok())
             .collect();
         layer = layer.allow_headers(AllowHeaders::list(headers));
     }
@@ -161,7 +162,7 @@ fn build_cors_layer(cors_config: &config::cors::CorsConfig) -> CorsLayer {
         let headers: Vec<_> = cors_config
             .expose_headers
             .iter()
-            .filter_map(|h| axum::http::HeaderName::from_bytes(h.as_bytes()).ok())
+            .filter_map(|h: &String| axum::http::HeaderName::from_bytes(h.as_bytes()).ok())
             .collect();
         layer = layer.expose_headers(ExposeHeaders::list(headers));
     }

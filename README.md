@@ -55,107 +55,35 @@ See [config.example.toml](config.example.toml) for all options (including [CORS]
 
 All endpoints are served under the `/api/v1` prefix.
 
+### Service-level
+
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/vnstat/` | Complete data for all interfaces |
-| GET | `/api/v1/vnstat/health` | vnStat health check |
-| GET | `/api/v1/vnstat/version` | vnStat version string |
-| GET | `/api/v1/vnstat/interfaces` | List of interface names |
-| GET | `/api/v1/vnstat/{if_name}` | Traffic data for one interface |
-| GET | `/api/v1/vnstat/{if_name}/live` | Real-time SSE stream |
+| GET | `/api/v1/health` | vnStat health check |
+| GET | `/api/v1/version` | vnStat version string |
 
-### `GET /api/v1/vnstat/`
+### Interface data
 
-Returns the complete vnStat data for all interfaces.
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/interfaces` | List of interface names |
+| GET | `/api/v1/interfaces/summary` | Compact summary for all interfaces |
+| GET | `/api/v1/interfaces/stats` | Aggregate traffic statistics |
+| GET | `/api/v1/interfaces/{if_name}` | Traffic data for one interface |
+| GET | `/api/v1/interfaces/{if_name}/summary` | Compact summary for one interface |
+| GET | `/api/v1/interfaces/{if_name}/updated` | Last-updated timestamp |
+| GET | `/api/v1/interfaces/{if_name}/live` | Real-time SSE stream |
+| GET | `/api/v1/interfaces/{if_name}/periods/day` | Daily traffic records |
+| GET | `/api/v1/interfaces/{if_name}/periods/hour` | Hourly traffic records |
+| GET | `/api/v1/interfaces/{if_name}/periods/month` | Monthly traffic records |
+| GET | `/api/v1/interfaces/{if_name}/periods/year` | Yearly traffic records |
+| GET | `/api/v1/interfaces/{if_name}/periods/fiveminute` | 5-minute traffic records |
+| GET | `/api/v1/interfaces/{if_name}/periods/top` | Top day records |
+| GET | `/api/v1/interfaces/{if_name}/periods/total` | Cumulative total (rx / tx) |
 
-**Response** (`200 OK`):
-```json
-{
-    "status": "success",
-    "code": 0,
-    "data": {
-        "interfaces": [
-            {
-                "name": "eth0",
-                "alias": "eth0",
-                "traffic": {
-                    "total": { "rx": 123456789, "tx": 987654321 },
-                    "day": [ /* ... daily records ... */ ],
-                    "hour": [ /* ... hourly records ... */ ],
-                    "month": [ /* ... monthly records ... */ ],
-                    "year": [ /* ... yearly records ... */ ],
-                    "fiveminute": [ /* ... 5-minute records ... */ ],
-                    "top": [ /* ... top records ... */ ]
-                },
-                "created": { "date": { "year": 2024, "month": 1, "day": 1 }, "timestamp": 1704067200 },
-                "updated": { "date": { "year": 2024, "month": 6, "day": 17 }, "time": { "hour": 10, "minute": 30 }, "timestamp": 1718613000 }
-            }
-        ],
-        "jsonversion": "2.0",
-        "vnstatversion": "2.10"
-    }
-}
-```
+---
 
-### `GET /api/v1/vnstat/version`
-
-Returns the vnStat version string.
-
-**Response** (`200 OK`):
-```json
-{
-    "status": "success",
-    "code": 0,
-    "data": "2.10"
-}
-```
-
-### `GET /api/v1/vnstat/interfaces`
-
-Returns a list of all monitored network interfaces.
-
-**Response** (`200 OK`):
-```json
-{
-    "status": "success",
-    "code": 0,
-    "data": ["eth0", "wlan0"]
-}
-```
-
-### `GET /api/v1/vnstat/{if_name}`
-
-Returns traffic statistics for a specific interface.
-
-**Parameters**: `if_name` — interface name (e.g., `eth0`)
-
-**Response** (`200 OK`):
-```json
-{
-    "status": "success",
-    "code": 0,
-    "data": { /* ... Interface object, same structure as above ... */ }
-}
-```
-
-**Error** (`400 Bad Request`):
-```json
-{
-    "status": "fail",
-    "code": 10001,
-    "message": "No such interface"
-}
-```
-
-### `GET /api/v1/vnstat/{if_name}/live`
-
-Real-time traffic stream via Server-Sent Events (SSE).
-
-**Parameters**: `if_name` — interface name
-
-**Response**: SSE stream with `data` events containing JSON lines from `vnstat -l --json`.
-
-### `GET /api/v1/vnstat/health`
+### `GET /api/v1/health`
 
 vnStat health check endpoint.
 
@@ -177,6 +105,210 @@ vnStat health check endpoint.
 }
 ```
 
+### `GET /api/v1/version`
+
+Returns the vnStat version string.
+
+**Response** (`200 OK`):
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": "2.10"
+}
+```
+
+---
+
+### `GET /api/v1/interfaces`
+
+Returns a list of all monitored network interfaces.
+
+**Response** (`200 OK`):
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": ["eth0", "wlan0"]
+}
+```
+
+### `GET /api/v1/interfaces/summary`
+
+Compact summary for every monitored interface.
+
+**Response** (`200 OK`):
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": [
+        {
+            "name": "eth0",
+            "alias": "eth0",
+            "total": { "rx": 123456789, "tx": 987654321 },
+            "todayRx": 1048576,
+            "todayTx": 524288,
+            "updatedTimestamp": 1718613000
+        }
+    ]
+}
+```
+
+### `GET /api/v1/interfaces/stats`
+
+Aggregate traffic statistics across all interfaces.
+
+**Response** (`200 OK`):
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": {
+        "totalInterfaces": 3,
+        "totalRx": 1234567890000,
+        "totalTx": 987654321000
+    }
+}
+```
+
+---
+
+### `GET /api/v1/interfaces/{if_name}`
+
+Returns traffic statistics for a specific interface.
+
+**Path parameters**: `if_name` — interface name (e.g., `eth0`)
+
+**Query parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `periods` | `string` | Comma-separated list of periods to include (`day`, `hour`, `month`, `year`, `fiveminute`, `top`, `total`). All periods are returned when absent. |
+| `limit` | `int` | Maximum records per period. No limit when absent. |
+
+**Example**: `GET /api/v1/interfaces/eth0?periods=day,hour,total&limit=7`
+
+**Response** (`200 OK`):
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": {
+        "name": "eth0",
+        "alias": "eth0",
+        "traffic": {
+            "total": { "rx": 123456789, "tx": 987654321 },
+            "day": [ /* ... up to N records ... */ ],
+            "hour": [ /* ... up to N records ... */ ],
+            "month": [],
+            "year": [],
+            "fiveminute": [],
+            "top": []
+        },
+        "created": { "date": { "year": 2024, "month": 1, "day": 1 }, "timestamp": 1704067200 },
+        "updated": { "date": { "year": 2024, "month": 6, "day": 17 }, "time": { "hour": 10, "minute": 30 }, "timestamp": 1718613000 }
+    }
+}
+```
+
+**Error** (`400 Bad Request`):
+```json
+{
+    "status": "fail",
+    "code": 10001,
+    "message": "No such interface"
+}
+```
+
+### `GET /api/v1/interfaces/{if_name}/summary`
+
+Compact summary for a single interface.
+
+**Response** (`200 OK`):
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": {
+        "name": "eth0",
+        "alias": "eth0",
+        "total": { "rx": 123456789, "tx": 987654321 },
+        "todayRx": 1048576,
+        "todayTx": 524288,
+        "updatedTimestamp": 1718613000
+    }
+}
+```
+
+### `GET /api/v1/interfaces/{if_name}/updated`
+
+Returns only the last-updated timestamp for an interface.
+
+**Response** (`200 OK`):
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": {
+        "date": { "year": 2024, "month": 6, "day": 17 },
+        "time": { "hour": 10, "minute": 30 },
+        "timestamp": 1718613000
+    }
+}
+```
+
+### `GET /api/v1/interfaces/{if_name}/live`
+
+Real-time traffic stream via Server-Sent Events (SSE).
+
+**Path parameters**: `if_name` — interface name
+
+**Response**: SSE stream with `data` events containing JSON lines from `vnstat -l --json`.
+
+### `GET /api/v1/interfaces/{if_name}/periods/{period}`
+
+Returns only a single time period's records for an interface, without the full interface wrapper.
+
+**Path parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `if_name` | `string` | Interface name (e.g., `eth0`) |
+| `period` | `string` | One of `day`, `hour`, `month`, `year`, `fiveminute`, `top`, `total` |
+
+**Examples**:
+
+```
+GET /api/v1/interfaces/eth0/periods/day
+GET /api/v1/interfaces/eth0/periods/hour
+GET /api/v1/interfaces/eth0/periods/month
+GET /api/v1/interfaces/eth0/periods/year
+GET /api/v1/interfaces/eth0/periods/fiveminute
+GET /api/v1/interfaces/eth0/periods/top
+GET /api/v1/interfaces/eth0/periods/total
+```
+
+**Response** (`200 OK`) for `total`:
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": { "rx": 123456789, "tx": 987654321 }
+}
+```
+
+**Response** (`200 OK`) for `top`:
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": [
+        { "id": 1, "date": { "year": 2024, "month": 6, "day": 15 }, "rx": 52428800, "tx": 26214400, "timestamp": 1718409600 }
+    ]
+}
+```
+
 ## Configuration
 
 Full configuration reference:
@@ -192,6 +324,9 @@ port = 3000
 [vnstat]
 # Path to the vnStat executable. Default: "/usr/bin/vnstat"
 executable = "/usr/bin/vnstat"
+
+# Timeout in seconds for each vnstat subprocess call. Default: 5
+# query_timeout_secs = 10
 ```
 
 ### CORS Configuration
