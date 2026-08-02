@@ -5,12 +5,14 @@ use crate::model::vnstat::{
     Updated, YearRecord,
 };
 use crate::utils::sse::sse_with_default_headers;
+use async_stream::stream;
 use axum::extract::FromRequest;
 use axum::extract::{Path, Query, State};
-use axum::response::sse::KeepAlive;
+use axum::response::sse::{Event, KeepAlive};
 use axum::response::{Response, Sse};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tracing::trace;
@@ -361,6 +363,10 @@ impl AggregateStats {
 /// updates for a single network interface.  The stream is kept alive
 /// with periodic keep-alive pings.
 ///
+/// When the server begins a graceful shutdown, the stream emits a final
+/// `shutdown` event and closes, so the long-lived connection does not block
+/// the shutdown drain.
+///
 /// # Returns
 ///
 /// An SSE response with `Cache-Control`, `Connection`, and
@@ -375,6 +381,28 @@ pub async fn get_interface_live_sse(
         .vnstat
         .stream_interface_live_stats(state.task_registry, if_name)
         .await;
+
+    // End the stream when graceful shutdown begins (emitting a farewell
+    // event first), so the server can drain this connection instead of
+    // waiting for the client to disconnect.
+    let shutdown_token = state.shutdown_token.clone();
+    let stream = stream! {
+        let mut stream = stream;
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_token.cancelled() => {
+                    yield Ok(Event::default().event("shutdown").data("server is shutting down"));
+                    break;
+                }
+                item = stream.next() => match item {
+                    Some(item) => yield item,
+                    None => break,
+                },
+            }
+        }
+    };
+
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
 
     sse_with_default_headers(sse)
@@ -388,6 +416,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     fn app_state() -> AppState {
         let script = test_support::fake_vnstat_script();
@@ -397,6 +426,7 @@ mod tests {
                 5,
             )),
             task_registry: Arc::new(crate::task_registry::TaskRegistry::new(4)),
+            shutdown_token: CancellationToken::new(),
         }
     }
 
@@ -457,6 +487,7 @@ mod tests {
                 5,
             )),
             task_registry: Arc::new(crate::task_registry::TaskRegistry::new(4)),
+            shutdown_token: CancellationToken::new(),
         };
         assert_error(
             get_version(State(bad_state)).await,
@@ -674,6 +705,46 @@ mod tests {
             }
         }
         assert!(saw_data, "expected at least one data frame");
+    }
+
+    /// The stream must end (after a farewell event) when the shutdown token
+    /// is cancelled, so active SSE connections do not block graceful shutdown.
+    #[tokio::test]
+    async fn live_sse_ends_when_shutdown_token_cancelled() {
+        use http_body_util::BodyExt;
+
+        let app_state = app_state();
+        let res = get_interface_live_sse(Path("eth0".into()), State(app_state.clone())).await;
+        let mut body = res.into_body();
+
+        // Confirm the stream is live first.
+        tokio::time::timeout(std::time::Duration::from_secs(3), body.frame())
+            .await
+            .expect("stream should be live within timeout")
+            .expect("body should not end")
+            .expect("no body error");
+
+        // Cancel the shutdown token: the stream should emit a farewell event
+        // and then close, so the server can drain the connection.
+        app_state.shutdown_token.cancel();
+
+        let mut farewell = false;
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(3), body.frame())
+                .await
+                .expect("stream should end within timeout after shutdown");
+            match frame {
+                Some(Ok(frame)) => {
+                    if let Ok(bytes) = frame.into_data() {
+                        if String::from_utf8_lossy(&bytes).contains("shutting down") {
+                            farewell = true;
+                        }
+                    }
+                }
+                Some(Err(_)) | None => break,
+            }
+        }
+        assert!(farewell, "expected a shutdown farewell event before EOF");
     }
 
     #[test]

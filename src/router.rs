@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 mod vnstat;
 
@@ -24,6 +25,11 @@ pub struct AppState {
     /// Registry of named subprocesses whose output is broadcast to
     /// multiple subscribers (used for SSE live streams).
     pub task_registry: Arc<TaskRegistry>,
+
+    /// Cancelled when the server receives a shutdown signal (SIGINT/SIGTERM).
+    /// Long-lived SSE handlers end their streams when it fires, so in-flight
+    /// connections can drain during graceful shutdown instead of blocking it.
+    pub shutdown_token: CancellationToken,
 }
 
 /// Handler for `GET /` — a simple service banner served at the root path.

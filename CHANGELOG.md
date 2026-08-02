@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-08-02
+
+### Fixed
+
+- Graceful shutdown (SIGINT/SIGTERM) no longer hangs when SSE live streams
+  are active. The server now ends active streams (after emitting a `shutdown`
+  farewell event) so in-flight connections can drain, allowing container
+  orchestration (e.g. Kubernetes) to stop the process cleanly instead of
+  force-killing it after the grace period.
+
 ## [1.1.0] - 2026-08-02
 
 ### ⚠️ Breaking changes
