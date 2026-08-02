@@ -1,5 +1,22 @@
 use clap::Parser;
 
+/// Full version string reported by `--version`.
+///
+/// Includes the git branch and short commit hash when built inside a git
+/// checkout (e.g. `1.2.0-dev@9bfa843`), falling back to the plain package
+/// version for release builds outside one.
+const VERSION: &str = if env!("GIT_BRANCH").is_empty() || env!("GIT_COMMIT").is_empty() {
+    env!("CARGO_PKG_VERSION")
+} else {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        "-",
+        env!("GIT_BRANCH"),
+        "@",
+        env!("GIT_COMMIT")
+    )
+};
+
 /// Command-line arguments for the vnstat-rs-api application.
 ///
 /// Parsed from the command line using [`clap::Parser`]. Both `--config <FILE>` and
@@ -7,7 +24,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = env!("CARGO_PKG_DESCRIPTION"))]
 #[command(author = env!("CARGO_PKG_AUTHORS"))]
-#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(version = VERSION)]
 #[command(
     about = "A RESTful Web API wrapper for vnstat's network traffic monitoring.",
     long_about = "vnstat-rs-api: A Rust-based tool that converts vnstat's CLI into a RESTful API. \

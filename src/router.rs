@@ -37,17 +37,22 @@ pub struct AppState {
     pub shutdown_token: CancellationToken,
 }
 
+/// Version suffix shown in the service banner for non-release builds.
+///
+/// `build.rs` computes it: `-dev` when built from a non-release branch
+/// (e.g. `dev`), empty for release builds (master or outside a git
+/// checkout). Commit metadata is deliberately not exposed here — use
+/// `--version` for the full build identifier.
+const BUILD_SUFFIX: &str = env!("GIT_DEV_SUFFIX");
+
 /// Handler for `GET /` — a simple service banner served at the root path.
 pub async fn home() -> Json<JsendResponse<String>> {
-    Json(JsendResponse::success_with_data(
-        concat!(
-            env!("CARGO_PKG_NAME"),
-            " v",
-            env!("CARGO_PKG_VERSION"),
-            " is up and running"
-        )
-        .to_string(),
-    ))
+    Json(JsendResponse::success_with_data(format!(
+        "{} v{}{} is up and running",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        BUILD_SUFFIX
+    )))
 }
 
 /// Fallback handler for unmatched paths — JSend-formatted `404`.
@@ -96,6 +101,15 @@ mod tests {
         assert!(banner.contains(env!("CARGO_PKG_NAME")));
         assert!(banner.contains(env!("CARGO_PKG_VERSION")));
         assert!(banner.contains("is up and running"));
+        // The banner shows at most a `-dev` suffix; it must not leak the
+        // commit hash (that belongs to `--version`).
+        if env!("GIT_BRANCH") != "master" && !env!("GIT_BRANCH").is_empty() {
+            assert!(banner.contains("-dev"), "banner should mark dev builds");
+        }
+        assert!(
+            !banner.contains('@'),
+            "banner must not contain commit metadata"
+        );
     }
 
     #[tokio::test]
