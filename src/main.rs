@@ -76,6 +76,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let app_state = AppState {
         vnstat,
         task_registry,
+        link_speed: config.link_speed,
         shutdown_token: shutdown_token.clone(),
     };
 

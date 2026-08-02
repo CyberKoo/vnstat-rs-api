@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- New endpoint `GET /api/v1/interfaces/{if_name}/link-speed` returns the
+  configured interface link speed (RX/TX in Mbps). Values are configured
+  per interface via `[link_speed.<if_name>]` tables (`rx` / `tx`) and
+  default to `1000` Mbps for interfaces without an entry.
+
 ## [1.1.1] - 2026-08-02
 
 ### Fixed

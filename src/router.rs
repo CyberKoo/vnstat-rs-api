@@ -1,3 +1,4 @@
+use crate::config::link_speed::LinkSpeedConfig;
 use crate::error_code::ErrorCode;
 use crate::model::jsend::JsendResponse;
 use crate::service::vnstat_service::VnstatService;
@@ -25,6 +26,10 @@ pub struct AppState {
     /// Registry of named subprocesses whose output is broadcast to
     /// multiple subscribers (used for SSE live streams).
     pub task_registry: Arc<TaskRegistry>,
+
+    /// Configured interface link speed (RX/TX in Mbps) reported by the
+    /// link-speed endpoint.
+    pub link_speed: LinkSpeedConfig,
 
     /// Cancelled when the server receives a shutdown signal (SIGINT/SIGTERM).
     /// Long-lived SSE handlers end their streams when it fires, so in-flight

@@ -85,6 +85,7 @@ pub fn interfaces_router() -> Router<AppState> {
         .route("/{if_name}", get(get_interface_data))
         .route("/{if_name}/summary", get(get_interface_summary))
         .route("/{if_name}/updated", get(get_interface_updated))
+        .route("/{if_name}/link-speed", get(get_interface_link_speed))
         .route("/{if_name}/live", get(get_interface_live_sse))
         .route("/{if_name}/periods/day", get(get_interface_period_day))
         .route("/{if_name}/periods/hour", get(get_interface_period_hour))
@@ -228,6 +229,37 @@ async fn get_interface_updated(
 ) -> Result<Json<JsendResponse<Updated>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
     Ok(Json(JsendResponse::success_with_data(data.updated)))
+}
+
+/// Reported link speed of an interface.
+#[derive(Debug, Serialize)]
+struct LinkSpeed {
+    interface: String,
+    /// RX link speed in Mbps.
+    rx: u64,
+    /// TX link speed in Mbps.
+    tx: u64,
+}
+
+/// Handler for `GET /interfaces/{if_name}/link-speed`.
+///
+/// Returns the configured RX/TX link speed (in Mbps) for the interface,
+/// defaulting to 1000 Mbps for interfaces without an entry in the
+/// `[link_speed]` configuration section.
+async fn get_interface_link_speed(
+    Path(if_name): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<JsendResponse<LinkSpeed>>, ApiError> {
+    // Validate the interface exists, consistent with the other
+    // `/{if_name}` routes (404 for unknown interfaces).
+    state.vnstat.get_interface(&if_name).await?;
+
+    let speed = state.link_speed.get(&if_name);
+    Ok(Json(JsendResponse::success_with_data(LinkSpeed {
+        interface: if_name,
+        rx: speed.rx,
+        tx: speed.tx,
+    })))
 }
 
 // ── Period handlers ─────────────────────────────────────────────────────────
@@ -426,6 +458,7 @@ mod tests {
                 5,
             )),
             task_registry: Arc::new(crate::task_registry::TaskRegistry::new(4)),
+            link_speed: Default::default(),
             shutdown_token: CancellationToken::new(),
         }
     }
@@ -487,6 +520,7 @@ mod tests {
                 5,
             )),
             task_registry: Arc::new(crate::task_registry::TaskRegistry::new(4)),
+            link_speed: Default::default(),
             shutdown_token: CancellationToken::new(),
         };
         assert_error(
@@ -590,6 +624,85 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(updated["data"]["timestamp"], 1780331400);
+    }
+
+    #[tokio::test]
+    async fn link_speed_defaults_to_1000() {
+        let json = json_of(
+            get_interface_link_speed(Path("eth0".into()), state())
+                .await
+                .unwrap(),
+        );
+        let data = json["data"].clone();
+        assert_eq!(data["interface"], "eth0");
+        assert_eq!(data["rx"], 1000);
+        assert_eq!(data["tx"], 1000);
+    }
+
+    #[tokio::test]
+    async fn link_speed_returns_configured_values() {
+        use crate::config::link_speed::LinkSpeed as ConfigLinkSpeed;
+        use crate::config::link_speed::LinkSpeedConfig as ConfigLinkSpeedConfig;
+
+        let app_state = AppState {
+            link_speed: ConfigLinkSpeedConfig {
+                interfaces: std::collections::HashMap::from([(
+                    "eth0".to_string(),
+                    ConfigLinkSpeed { rx: 500, tx: 2000 },
+                )]),
+            },
+            ..app_state()
+        };
+        let json = json_of(
+            get_interface_link_speed(Path("eth0".into()), State(app_state))
+                .await
+                .unwrap(),
+        );
+        let data = json["data"].clone();
+        assert_eq!(data["interface"], "eth0");
+        assert_eq!(data["rx"], 500);
+        assert_eq!(data["tx"], 2000);
+    }
+
+    #[tokio::test]
+    async fn link_speed_is_per_interface() {
+        use crate::config::link_speed::LinkSpeed as ConfigLinkSpeed;
+        use crate::config::link_speed::LinkSpeedConfig as ConfigLinkSpeedConfig;
+
+        // Only eth0 is configured; wlan0 must fall back to the default.
+        let app_state = AppState {
+            link_speed: ConfigLinkSpeedConfig {
+                interfaces: std::collections::HashMap::from([(
+                    "eth0".to_string(),
+                    ConfigLinkSpeed { rx: 500, tx: 2000 },
+                )]),
+            },
+            ..app_state()
+        };
+
+        let eth0 = json_of(
+            get_interface_link_speed(Path("eth0".into()), State(app_state.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(eth0["data"]["rx"], 500);
+        assert_eq!(eth0["data"]["tx"], 2000);
+
+        let wlan0 = json_of(
+            get_interface_link_speed(Path("wlan0".into()), State(app_state))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(wlan0["data"]["rx"], 1000);
+        assert_eq!(wlan0["data"]["tx"], 1000);
+    }
+
+    #[tokio::test]
+    async fn link_speed_unknown_interface_returns_404() {
+        let result: Result<Json<JsendResponse<LinkSpeed>>, ApiError> =
+            get_interface_link_speed(Path("eth9".into()), state()).await;
+        let err = result.expect_err("expected a 404 error");
+        assert_error::<LinkSpeed>(Err(err), StatusCode::NOT_FOUND, 10001, "fail").await;
     }
 
     #[tokio::test]

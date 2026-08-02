@@ -1,5 +1,6 @@
 use self::traits::ConfigEntity;
 use crate::config::cors::CorsConfig;
+use crate::config::link_speed::LinkSpeedConfig;
 use crate::config::server::ServerConfig;
 use crate::config::sse::SseConfig;
 use crate::config::vnstat::VnstatConfig;
@@ -9,6 +10,7 @@ use std::fs;
 use std::path::Path;
 
 pub mod cors;
+pub mod link_speed;
 pub mod server;
 pub mod sse;
 pub mod traits;
@@ -16,11 +18,12 @@ pub mod vnstat;
 
 /// Top-level application configuration deserialized from a TOML file.
 ///
-/// Contains four subsections:
+/// Contains five subsections:
 /// - `server`: required, controls the HTTP listener settings.
 /// - `vnstat`: optional with defaults, configures the vnStat binary path.
 /// - `cors`:  optional with defaults, configures CORS behaviour.
 /// - `sse`:   optional with defaults, configures SSE live-stream behaviour.
+/// - `link_speed`: optional with defaults, configures the reported link speed.
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -33,6 +36,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub sse: SseConfig,
+
+    #[serde(default)]
+    pub link_speed: LinkSpeedConfig,
 }
 
 impl ConfigEntity for AppConfig {
@@ -64,6 +70,7 @@ impl ConfigEntity for AppConfig {
         self.server.validate()?;
         self.vnstat.validate()?;
         self.sse.validate()?;
+        self.link_speed.validate()?;
 
         Ok(())
     }
@@ -134,7 +141,7 @@ mod tests {
         let p = crate::test_support::write_temp_file(
             "cfg",
             &format!(
-                "[server]\nlisten = \"localhost\"\nport = 8080\n\n[vnstat]\nexecutable = \"{}\"\nquery_timeout_secs = 3\n\n[sse]\nsubscriber_buffer = 8\n",
+                "[server]\nlisten = \"localhost\"\nport = 8080\n\n[vnstat]\nexecutable = \"{}\"\nquery_timeout_secs = 3\n\n[sse]\nsubscriber_buffer = 8\n\n[link_speed.eth0]\nrx = 500\ntx = 2500\n",
                 script.display()
             ),
         );
@@ -143,6 +150,9 @@ mod tests {
         assert_eq!(cfg.server.port, 8080);
         assert_eq!(cfg.vnstat.query_timeout_secs, 3);
         assert_eq!(cfg.sse.subscriber_buffer, 8);
+        assert_eq!(cfg.link_speed.get("eth0").rx, 500);
+        assert_eq!(cfg.link_speed.get("eth0").tx, 2500);
+        assert_eq!(cfg.link_speed.get("wlan0").rx, 1000);
         assert!(!cfg.cors.enabled);
         let _ = fs::remove_file(&p);
     }
@@ -154,6 +164,8 @@ mod tests {
         assert_eq!(cfg.server.port, 3000);
         assert_eq!(cfg.vnstat.executable, "/usr/bin/vnstat");
         assert_eq!(cfg.sse.subscriber_buffer, 4);
+        assert_eq!(cfg.link_speed.get("eth0").rx, 1000);
+        assert_eq!(cfg.link_speed.get("eth0").tx, 1000);
         let _ = fs::remove_file(&p);
     }
 

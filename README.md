@@ -110,6 +110,7 @@ Service banner served at the root path (outside `/api/v1`).
 | GET | `/api/v1/interfaces/{if_name}` | Traffic data for one interface |
 | GET | `/api/v1/interfaces/{if_name}/summary` | Compact summary for one interface |
 | GET | `/api/v1/interfaces/{if_name}/updated` | Last-updated timestamp |
+| GET | `/api/v1/interfaces/{if_name}/link-speed` | Configured link speed (rx / tx, Mbps) |
 | GET | `/api/v1/interfaces/{if_name}/live` | Real-time SSE stream |
 | GET | `/api/v1/interfaces/{if_name}/periods/day` | Daily traffic records |
 | GET | `/api/v1/interfaces/{if_name}/periods/hour` | Hourly traffic records |
@@ -285,6 +286,36 @@ Returns only the last-updated timestamp for an interface.
         "date": { "year": 2024, "month": 6, "day": 17 },
         "time": { "hour": 10, "minute": 30 },
         "timestamp": 1718613000
+    }
+}
+```
+
+### `GET /api/v1/interfaces/{if_name}/link-speed`
+
+Returns the configured link speed (RX/TX in Mbps) for an interface. The
+values are read **per interface** from the `[link_speed]` section of the
+configuration file; interfaces without an entry default to `1000` Mbps on
+both directions:
+
+```toml
+[link_speed.eth0]
+rx = 1000  # RX link speed in Mbps (default: 1000)
+tx = 1000  # TX link speed in Mbps (default: 1000)
+
+[link_speed.wlan0]
+rx = 866
+tx = 866
+```
+
+**Response** (`200 OK`):
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": {
+        "interface": "eth0",
+        "rx": 1000,
+        "tx": 1000
     }
 }
 ```
