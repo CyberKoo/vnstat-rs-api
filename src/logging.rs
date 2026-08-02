@@ -27,15 +27,7 @@ use tracing_subscriber::fmt;
 /// Once the subscriber is installed this function cannot be called again
 /// (a subsequent call will panic).
 pub fn init(debug: bool) -> Result<()> {
-    let filter = if debug {
-        EnvFilter::builder()
-            .with_default_directive(tracing::Level::DEBUG.into())
-            .from_env_lossy()
-    } else {
-        EnvFilter::builder()
-            .with_default_directive(tracing::Level::INFO.into())
-            .from_env_lossy()
-    };
+    let filter = build_env_filter(debug);
 
     #[allow(deprecated)]
     let format = time::format_description::parse(
@@ -51,7 +43,47 @@ pub fn init(debug: bool) -> Result<()> {
         .with_target(true)
         .with_level(true)
         .with_ansi(true)
-        .init();
+        .try_init()
+        .unwrap_or_else(|e| {
+            // A subscriber is already installed (e.g. tests running multiple
+            // server instances in one process): keep the existing one and
+            // continue instead of panicking.
+            tracing::warn!("tracing subscriber already set: {}", e);
+        });
 
     Ok(())
+}
+
+/// Builds the log filter for the given debug flag.
+///
+/// The effective filter can be overridden via the `RUST_LOG` environment
+/// variable; the `debug` flag only sets the fallback default level.
+fn build_env_filter(debug: bool) -> EnvFilter {
+    let default_level = if debug {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+
+    EnvFilter::builder()
+        .with_default_directive(default_level.into())
+        .from_env_lossy()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_defaults_to_debug_level() {
+        let filter = build_env_filter(true);
+        let directive = filter.to_string();
+        assert!(directive.contains("debug"));
+    }
+
+    #[test]
+    fn release_defaults_to_info_level() {
+        let filter = build_env_filter(false);
+        assert!(filter.to_string().contains("info"));
+    }
 }

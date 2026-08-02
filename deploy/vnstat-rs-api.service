@@ -1,0 +1,43 @@
+[Unit]
+Description=vnStat RESTful API service
+Documentation=https://github.com/CyberKoo/vnstat-rs-api
+After=network.target
+Wants=vnstat.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+
+# Paths
+ExecStart=/usr/local/bin/vnstat-rs-api -c /etc/vnstat-rs-api/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart behaviour
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+#ReadWritePaths=/var/lib/vnstat-rs-api
+ReadOnlyPaths=/etc/vnstat-rs-api /usr/local/bin/vnstat-rs-api
+
+# InaccessiblePaths=/run - allow socket access if needed
+
+# Timeouts
+TimeoutStartSec=10
+TimeoutStopSec=30
+
+# Graceful shutdown via SIGTERM (the binary handles SIGTERM/SIGINT)
+KillSignal=SIGTERM
+KillMode=process
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vnstat-rs-api
+
+[Install]
+WantedBy=multi-user.target

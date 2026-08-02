@@ -14,3 +14,21 @@ pub fn get_in_ms() -> u128 {
 
     since_the_epoch.as_millis()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn returns_positive_millis() {
+        assert!(get_in_ms() > 1_700_000_000_000);
+    }
+
+    #[test]
+    fn is_monotonic() {
+        let a = get_in_ms();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = get_in_ms();
+        assert!(b >= a);
+    }
+}

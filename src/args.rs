@@ -22,3 +22,27 @@ pub struct Args {
     #[arg(short, long, default_value = "false", help = "Enable debug mode")]
     pub debug: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_defaults() {
+        let args = Args::try_parse_from(["test"]).unwrap();
+        assert_eq!(args.config, "config.toml");
+        assert!(!args.debug);
+    }
+
+    #[test]
+    fn parses_custom_args() {
+        let args = Args::try_parse_from(["test", "-c", "/tmp/x.toml", "-d"]).unwrap();
+        assert_eq!(args.config, "/tmp/x.toml");
+        assert!(args.debug);
+    }
+
+    #[test]
+    fn rejects_unknown_args() {
+        assert!(Args::try_parse_from(["test", "--bogus"]).is_err());
+    }
+}

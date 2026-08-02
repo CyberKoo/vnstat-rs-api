@@ -98,3 +98,67 @@ fn default_listen() -> String {
 fn default_port() -> u16 {
     3000
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(listen: &str, port: u16) -> ServerConfig {
+        ServerConfig {
+            listen: listen.to_string(),
+            port,
+        }
+    }
+
+    #[test]
+    fn defaults() {
+        let c = ServerConfig::default();
+        assert_eq!(c.listen, "0.0.0.0");
+        assert_eq!(c.port, 3000);
+    }
+
+    #[test]
+    fn finalize_resolves_localhost_aliases() {
+        for (input, expected) in [
+            ("localhost", "127.0.0.1"),
+            ("LOCALHOST", "127.0.0.1"),
+            ("localhost6", "::1"),
+            ("ip6-localhost", "::1"),
+        ] {
+            let mut c = config(input, 3000);
+            c.finalize().unwrap();
+            assert_eq!(c.listen, expected, "input: {}", input);
+        }
+    }
+
+    #[test]
+    fn finalize_keeps_ip_addresses_untouched() {
+        let mut c = config("192.168.1.5", 3000);
+        c.finalize().unwrap();
+        assert_eq!(c.listen, "192.168.1.5");
+    }
+
+    #[test]
+    fn validate_accepts_valid_ip() {
+        assert!(config("127.0.0.1", 3000).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_invalid_ip() {
+        assert!(config("not-an-ip", 3000).validate().is_err());
+    }
+
+    #[test]
+    fn to_socket_addr_combines_ip_and_port() {
+        let c = config("127.0.0.1", 8080);
+        assert_eq!(
+            c.to_socket_addr().unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], 8080))
+        );
+    }
+
+    #[test]
+    fn to_socket_addr_rejects_invalid_ip() {
+        assert!(config("nope", 8080).to_socket_addr().is_err());
+    }
+}

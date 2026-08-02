@@ -179,7 +179,7 @@ pub struct TopRecord {
 }
 
 /// Cumulative total traffic since the interface was created.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Total {
     /// Total bytes received since creation.
     pub rx: u64,
@@ -207,4 +207,60 @@ pub struct YearRecord {
 pub struct YearDate {
     /// Four-digit year (e.g. 2025).
     pub year: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_sample_vnstat_json() {
+        let data: VnstatData =
+            serde_json::from_str(crate::test_support::SAMPLE_VNSTAT_JSON).unwrap();
+        assert_eq!(data.vnstatversion, "2.13");
+        assert_eq!(data.interfaces.len(), 2);
+
+        let eth0 = &data.interfaces[0];
+        assert_eq!(eth0.name, "eth0");
+        assert_eq!(eth0.alias, "");
+        assert_eq!(eth0.traffic.day.len(), 2);
+        assert_eq!(eth0.traffic.hour.len(), 1);
+        assert_eq!(eth0.traffic.month.len(), 1);
+        assert_eq!(eth0.traffic.year.len(), 1);
+        assert_eq!(eth0.traffic.top.len(), 1);
+        assert_eq!(eth0.traffic.fiveminute.len(), 1);
+        assert_eq!(eth0.traffic.total.rx, 123456789);
+        assert_eq!(eth0.traffic.total.tx, 987654321);
+        assert_eq!(eth0.traffic.day[0].rx, 100000000);
+        assert_eq!(eth0.traffic.day[0].date.year, 2026);
+        assert_eq!(eth0.updated.timestamp, 1780331400);
+        assert_eq!(eth0.created.timestamp, 1755223044);
+
+        let wlan0 = &data.interfaces[1];
+        assert_eq!(wlan0.alias, "Wireless");
+        assert!(wlan0.traffic.day.is_empty());
+        assert_eq!(wlan0.traffic.total.rx, 1);
+    }
+
+    #[test]
+    fn serializes_back_to_valid_json() {
+        let data: VnstatData =
+            serde_json::from_str(crate::test_support::SAMPLE_VNSTAT_JSON).unwrap();
+        let json = serde_json::to_string(&data).unwrap();
+        let round: VnstatData = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.interfaces[0].name, "eth0");
+        assert_eq!(round.interfaces[1].traffic.total.tx, 2);
+    }
+
+    #[test]
+    fn date_with_optional_fields() {
+        let date: Date = serde_json::from_str(r#"{"year":2026}"#).unwrap();
+        assert_eq!(date.year, 2026);
+        assert_eq!(date.month, None);
+        assert_eq!(date.day, None);
+
+        let date: Date = serde_json::from_str(r#"{"year":2026,"month":6,"day":2}"#).unwrap();
+        assert_eq!(date.month, Some(6));
+        assert_eq!(date.day, Some(2));
+    }
 }

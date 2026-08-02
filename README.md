@@ -4,6 +4,8 @@ A RESTful Web API wrapper for [vnStat](https://humdi.net/vnstat/) network traffi
 
 vnstat-rs-api converts vnStat's CLI output into a clean RESTful JSON API, providing endpoints to query network interfaces, traffic statistics (daily, monthly, yearly, etc.), and real-time updates via Server-Sent Events (SSE).
 
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Features
 
 - **Complete traffic data** via JSON — daily, hourly, 5-minute, monthly, yearly, and top records
@@ -53,13 +55,27 @@ See [config.example.toml](config.example.toml) for all options (including [CORS]
 
 ## API Endpoints
 
-All endpoints are served under the `/api/v1` prefix.
+All API endpoints are served under the `/api/v1` prefix. The root path `/`
+returns a simple service banner (see below).
+
+### `GET /`
+
+Service banner served at the root path (outside `/api/v1`).
+
+**Response** (`200 OK`):
+```json
+{
+    "status": "success",
+    "code": 0,
+    "data": "vnstat-rs-api v1.0.1 is up and running"
+}
+```
 
 ### Service-level
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/health` | vnStat health check |
+| GET | `/api/v1/health` | Service health (liveness) check |
 | GET | `/api/v1/version` | vnStat version string |
 
 ### Interface data
@@ -85,7 +101,9 @@ All endpoints are served under the `/api/v1` prefix.
 
 ### `GET /api/v1/health`
 
-vnStat health check endpoint.
+Liveness probe for container orchestration (Kubernetes, Docker). Returns
+`200 OK` as long as the server process is running; it does **not** invoke
+vnstat.
 
 **Response** (`200 OK`):
 ```json
@@ -93,15 +111,6 @@ vnStat health check endpoint.
     "status": "success",
     "code": 0,
     "data": "ok"
-}
-```
-
-**Response** (`503 Service Unavailable`):
-```json
-{
-    "status": "error",
-    "code": 10000,
-    "message": "vnstat health check failed: ..."
 }
 ```
 
@@ -212,12 +221,12 @@ Returns traffic statistics for a specific interface.
 }
 ```
 
-**Error** (`400 Bad Request`):
+**Error** (`404 Not Found`):
 ```json
 {
     "status": "fail",
     "code": 10001,
-    "message": "No such interface"
+    "message": "no such interface: eth0"
 }
 ```
 
@@ -327,6 +336,12 @@ executable = "/usr/bin/vnstat"
 
 # Timeout in seconds for each vnstat subprocess call. Default: 5
 # query_timeout_secs = 10
+
+[sse]
+# Per-subscriber SSE output buffer capacity (number of messages).
+# A slow client loses messages instead of blocking the vnstat live-stream
+# pipeline. Must be > 0. Default: 4
+# subscriber_buffer = 4
 ```
 
 ### CORS Configuration
@@ -378,7 +393,14 @@ CORS is **disabled by default**. To enable it, set `enabled = true` and adjust o
 | 0     | No error           |
 | 10000 | Get data failed    |
 | 10001 | No such interface  |
+| 10002 | Invalid parameter  |
+| 10003 | Resource not found |
 | 99999 | Unknown error      |
+
+All responses use the [JSend](https://github.com/omniti-labs/jsend) envelope. The
+`status` field is `"success"` on 2xx, `"fail"` for client errors (4xx, e.g.
+`404 No such interface`), and `"error"` for server errors (5xx, e.g.
+`503` when the vnstat query fails or times out).
 
 ## Development
 
@@ -391,6 +413,13 @@ cargo build --release
 
 # Run clippy lints
 cargo clippy --all-targets
+
+# Run tests
+cargo test
+
+# Coverage (line + branch; branch requires nightly)
+cargo llvm-cov --workspace          # line coverage (stable)
+cargo +nightly llvm-cov --workspace --branch --summary-only
 ```
 
 ## License

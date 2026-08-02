@@ -2,16 +2,15 @@ use crate::args::Args;
 use crate::router::AppState;
 use anyhow::Context;
 use axum::Router;
+use axum::routing::get;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::signal;
-use tower_http::cors::{
-    AllowCredentials, AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders,
-};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+mod api_error;
 mod args;
 mod config;
 mod error_code;
@@ -22,12 +21,27 @@ mod service;
 mod task_registry;
 mod utils;
 
+#[cfg(test)]
+mod test_support;
+
 /// Entry point for the vnstat-rs API server.
 ///
 /// Parses command-line arguments, initialises logging, loads configuration,
-/// and starts the Axum HTTP server with graceful shutdown support.  The
-/// server binds to the address and port specified in the configuration file
-/// and exposes all routes under `/api/v1`.
+/// Entry point for the vnstat-rs API server.
+///
+/// Parses command-line arguments and delegates to [`run`].
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    run(args).await
+}
+
+/// Starts the HTTP server with the given arguments.
+///
+/// Initialises logging, loads configuration, and starts the Axum HTTP
+/// server with graceful shutdown support.  The server binds to the address
+/// and port specified in the configuration file and exposes all routes
+/// under `/api/v1`.
 ///
 /// # Returns
 ///
@@ -39,10 +53,7 @@ mod utils;
 /// * Returns an error if the configuration file cannot be loaded or parsed.
 /// * Returns an error if the server socket cannot be bound.
 /// * Returns an error if the server encounters a fatal runtime failure.
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-
+async fn run(args: Args) -> anyhow::Result<()> {
     logging::init(args.debug)?;
     tracing::debug!("debug mode enabled");
 
@@ -53,7 +64,9 @@ async fn main() -> anyhow::Result<()> {
         config.vnstat.executable,
         config.vnstat.query_timeout_secs,
     ));
-    let task_registry = Arc::new(task_registry::TaskRegistry::new());
+    let task_registry = Arc::new(task_registry::TaskRegistry::new(
+        config.sse.subscriber_buffer,
+    ));
 
     let app_state = AppState {
         vnstat,
@@ -61,13 +74,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
+        .route("/", get(router::home))
         .nest("/api/v1", router::get_router())
+        .fallback(router::not_found)
+        .method_not_allowed_fallback(router::method_not_allowed)
         .layer(TraceLayer::new_for_http());
 
     // Apply CORS layer based on configuration.
     let app = if config.cors.enabled {
-        let cors = build_cors_layer(&config.cors);
-        app.layer(cors)
+        app.layer(config.cors.to_layer())
     } else {
         app
     };
@@ -92,92 +107,6 @@ async fn main() -> anyhow::Result<()> {
     info!("Server shut down gracefully");
 
     Ok(())
-}
-
-/// Build a [`CorsLayer`] from the application's CORS configuration.
-///
-/// Translates the values in [`CorsConfig`] into the corresponding
-/// `tower-http` CORS middleware.  When `allowed_origins` is empty the
-/// layer uses `AllowOrigin::any()` (or `AllowOrigin::mirror_request()` if
-/// credentials are enabled, since the CORS spec forbids a wildcard origin
-/// with credentials).
-///
-/// # Arguments
-///
-/// * `cors_config` - A reference to the deserialised CORS configuration
-///   containing allowed origins, methods, headers, exposed headers,
-///   credentials, and an optional max-age.
-///
-/// # Returns
-///
-/// A fully configured [`CorsLayer`] ready to be applied to the Axum router.
-fn build_cors_layer(cors_config: &config::cors::CorsConfig) -> CorsLayer {
-    let mut layer = CorsLayer::new();
-
-    // --- allowed_origins ---
-    if cors_config.allowed_origins.is_empty() {
-        // No specific origins → allow all.
-        // NOTE: If credentials are also enabled, wildcard won't work per CORS spec;
-        // in that case we use mirror_request which echoes back the request's Origin.
-        if cors_config.allow_credentials {
-            layer = layer.allow_origin(AllowOrigin::mirror_request());
-        } else {
-            layer = layer.allow_origin(AllowOrigin::any());
-        }
-    } else {
-        let origins: Vec<_> = cors_config
-            .allowed_origins
-            .iter()
-            .filter_map(|o| axum::http::HeaderValue::from_str(o).ok())
-            .collect();
-        layer = layer.allow_origin(AllowOrigin::list(origins));
-    }
-
-    // --- allowed_methods ---
-    if cors_config.allowed_methods.is_empty() {
-        layer = layer.allow_methods(AllowMethods::any());
-    } else {
-        let methods: Vec<_> = cors_config
-            .allowed_methods
-            .iter()
-            .filter_map(|m: &String| axum::http::Method::from_bytes(m.as_bytes()).ok())
-            .collect();
-        layer = layer.allow_methods(AllowMethods::list(methods));
-    }
-
-    // --- allowed_headers ---
-    if cors_config.allowed_headers.is_empty() {
-        layer = layer.allow_headers(AllowHeaders::any());
-    } else {
-        let headers: Vec<_> = cors_config
-            .allowed_headers
-            .iter()
-            .filter_map(|h: &String| axum::http::HeaderName::from_bytes(h.as_bytes()).ok())
-            .collect();
-        layer = layer.allow_headers(AllowHeaders::list(headers));
-    }
-
-    // --- expose_headers ---
-    if !cors_config.expose_headers.is_empty() {
-        let headers: Vec<_> = cors_config
-            .expose_headers
-            .iter()
-            .filter_map(|h: &String| axum::http::HeaderName::from_bytes(h.as_bytes()).ok())
-            .collect();
-        layer = layer.expose_headers(ExposeHeaders::list(headers));
-    }
-
-    // --- allow_credentials ---
-    if cors_config.allow_credentials {
-        layer = layer.allow_credentials(AllowCredentials::yes());
-    }
-
-    // --- max_age ---
-    if let Some(max_age) = cors_config.max_age {
-        layer = layer.max_age(std::time::Duration::from_secs(max_age));
-    }
-
-    layer
 }
 
 /// Wait for a shutdown signal (Ctrl+C or SIGTERM) and initiate graceful
@@ -219,4 +148,94 @@ async fn shutdown_signal() {
     }
 
     info!("Shutdown signal received, gracefully stopping...");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support;
+
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    /// Serialises the end-to-end `run()` tests: they send SIGTERM to the
+    /// whole test process, so they must not overlap each other.
+    static RUN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn temp_config(port: u16, vnstat_path: &str) -> String {
+        format!(
+            "[server]\nlisten = \"127.0.0.1\"\nport = {}\n\n[vnstat]\nexecutable = \"{}\"\nquery_timeout_secs = 5\n",
+            port, vnstat_path
+        )
+    }
+
+    fn temp_config_with_cors(port: u16, vnstat_path: &str) -> String {
+        format!(
+            "[server]\nlisten = \"127.0.0.1\"\nport = {}\n\n[vnstat]\nexecutable = \"{}\"\nquery_timeout_secs = 5\n\n[cors]\nenabled = true\nallowed_origins = [\"http://localhost:5173\"]\n",
+            port, vnstat_path
+        )
+    }
+
+    #[tokio::test]
+    async fn run_with_cors_enabled_starts_and_shuts_down() {
+        let _guard = RUN_LOCK.lock().await;
+        let port = free_port();
+        let script = test_support::fake_vnstat_script();
+        let config_path = test_support::write_temp_file(
+            "run-config-cors",
+            &temp_config_with_cors(port, script.to_str().unwrap()),
+        );
+
+        let pid = std::process::id();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
+        });
+
+        let args = Args {
+            config: config_path.to_str().unwrap().to_string(),
+            debug: false,
+        };
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "server with CORS enabled should shut down gracefully, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn run_starts_server_and_shuts_down_gracefully_on_sigterm() {
+        let _guard = RUN_LOCK.lock().await;
+        let port = free_port();
+        let script = test_support::fake_vnstat_script();
+        let config_path = test_support::write_temp_file(
+            "run-config",
+            &temp_config(port, script.to_str().unwrap()),
+        );
+
+        // Send SIGTERM after the server has had time to start.
+        let pid = std::process::id();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
+        });
+
+        let args = Args {
+            config: config_path.to_str().unwrap().to_string(),
+            debug: false,
+        };
+        let result = run(args).await;
+        assert!(
+            result.is_ok(),
+            "server should shut down gracefully, got: {:?}",
+            result
+        );
+    }
 }

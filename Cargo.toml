@@ -1,7 +1,7 @@
 [package]
 name = "vnstat-rs-api" # the name of the package
 edition = "2024"
-version = "1.0.1"
+version = "1.1.0"
 authors = ["Kotarou"]
 
 [dependencies]
@@ -22,6 +22,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 tokio = { version = "1.47", features = ["io-util", "rt-multi-thread", "sync", "process", "signal", "time"], default-features = false }
 axum = { version = "0.8", features = ["http1", "json", "matched-path", "original-uri", "query", "tokio"], default-features = false }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
+
+[dev-dependencies]
+http-body = "1"
+http-body-util = "0.1"
+tokio = { version = "1.47", features = ["macros"] }
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = "fat"

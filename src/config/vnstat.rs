@@ -58,3 +58,43 @@ fn default_executable() -> String {
 fn default_timeout() -> u64 {
     5
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults() {
+        let c = VnstatConfig::default();
+        assert_eq!(c.executable, "/usr/bin/vnstat");
+        assert_eq!(c.query_timeout_secs, 5);
+    }
+
+    #[test]
+    fn validate_rejects_empty_executable() {
+        let c = VnstatConfig {
+            executable: String::new(),
+            query_timeout_secs: 5,
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_nonexistent_executable() {
+        let c = VnstatConfig {
+            executable: "/nonexistent/vnstat".into(),
+            query_timeout_secs: 5,
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_existing_file() {
+        let tmp = crate::test_support::write_script("#!/bin/sh\nexit 0\n");
+        let c = VnstatConfig {
+            executable: tmp.to_str().unwrap().into(),
+            query_timeout_secs: 5,
+        };
+        assert!(c.validate().is_ok());
+    }
+}
