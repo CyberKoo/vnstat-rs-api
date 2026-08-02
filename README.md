@@ -53,10 +53,32 @@ See [config.example.toml](config.example.toml) for all options (including [CORS]
 ./target/release/vnstat-rs-api -c config.toml
 ```
 
+## Versioning & API Stability
+
+The public API (all endpoints under `/api/v1`) is considered **stable** as of
+version **1.1.0**. From that release onward, this project follows
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html):
+
+| Release type | Example | Meaning |
+|--------------|---------|---------|
+| Major | `2.0.0` | Breaking changes: endpoint removal or renaming, response schema changes, error code changes, configuration format changes |
+| Minor | `1.1.0` → `1.2.0` | New backwards-compatible endpoints, response fields, or features |
+| Patch | `1.1.1` → `1.1.2` | Bug fixes and internal improvements, no API changes |
+
+This guarantees that within the same major version:
+
+- Existing endpoints, response schemas, and error codes remain compatible.
+- New capabilities are only ever added in a backwards-compatible way.
+- All API-affecting changes are documented in the [CHANGELOG](CHANGELOG.md).
+
 ## API Endpoints
 
 All API endpoints are served under the `/api/v1` prefix. The root path `/`
 returns a simple service banner (see below).
+
+> **Stable API**: all endpoints documented below are stable as of v1.1.0.
+> The project follows [Semantic Versioning](#versioning--api-stability) —
+> breaking changes will only arrive in major releases (e.g. `2.0.0`).
 
 ### `GET /`
 
