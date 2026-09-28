@@ -1,20 +1,18 @@
+use crate::app::build_app;
 use crate::args::Args;
 use crate::router::AppState;
 use anyhow::Context;
-use axum::Router;
-use axum::routing::get;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::TraceLayer;
 use tracing::info;
 
-mod api_error;
+mod api;
+mod app;
 mod args;
 mod config;
-mod error_code;
 mod logging;
 mod model;
 mod router;
@@ -25,9 +23,6 @@ mod utils;
 #[cfg(test)]
 mod test_support;
 
-/// Entry point for the vnstat-rs API server.
-///
-/// Parses command-line arguments, initialises logging, loads configuration,
 /// Entry point for the vnstat-rs API server.
 ///
 /// Parses command-line arguments and delegates to [`run`].
@@ -62,7 +57,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     info!("Configuration loaded successfully");
 
     let vnstat = Arc::new(service::vnstat_service::VnstatService::new(
-        config.vnstat.executable,
+        config.vnstat.executable.clone(),
         config.vnstat.query_timeout_secs,
     ));
     let task_registry = Arc::new(task_registry::TaskRegistry::new(
@@ -76,25 +71,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let app_state = AppState {
         vnstat,
         task_registry,
-        link_speed: config.link_speed,
+        link_speed: config.link_speed.clone(),
         shutdown_token: shutdown_token.clone(),
     };
 
-    let app = Router::new()
-        .route("/", get(router::home))
-        .nest("/api/v1", router::get_router())
-        .fallback(router::not_found)
-        .method_not_allowed_fallback(router::method_not_allowed)
-        .layer(TraceLayer::new_for_http());
-
-    // Apply CORS layer based on configuration.
-    let app = if config.cors.enabled {
-        app.layer(config.cors.to_layer())
-    } else {
-        app
-    };
-
-    let app = app.with_state(app_state);
+    let app = build_app(&config, app_state);
 
     let listener = tokio::net::TcpListener::bind(config.server.to_socket_addr()?)
         .await
@@ -125,7 +106,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
 /// never completes, effectively falling back to the other signal.
 ///
 /// This function is designed to be used with
-/// [`axum::serve::with_graceful_shutdown`].
+/// The server uses Axum's graceful-shutdown support.
 ///
 /// When a signal is received the token is cancelled *before* this future
 /// completes, so handlers that observe the token (e.g. SSE streams) start
@@ -279,6 +260,7 @@ mod tests {
         // A tiny HTTP/1.1 SSE client on a separate thread: it opens the live
         // stream, reads events, and waits for the server to close the
         // connection.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let client = std::thread::spawn(move || {
             use std::io::{BufRead, BufReader, Write};
             use std::net::TcpStream;
@@ -321,8 +303,9 @@ mod tests {
                 match reader.read_line(&mut line) {
                     Ok(0) => break, // EOF: server closed the connection
                     Ok(_) => {
-                        if line.contains("jsonversion") {
+                        if !saw_event && line.contains("jsonversion") {
                             saw_event = true;
+                            let _ = ready_tx.send(());
                         }
                         if line.contains("shutting down") {
                             saw_farewell = true;
@@ -334,8 +317,14 @@ mod tests {
             (saw_event, saw_farewell)
         });
 
-        // Let the stream establish and deliver a few events, then shut down.
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // Wait for a real SSE event rather than assuming that a connection
+        // and the vnStat query have completed after a fixed sleep.
+        tokio::task::spawn_blocking(move || {
+            ready_rx.recv_timeout(std::time::Duration::from_secs(10))
+        })
+        .await
+        .expect("readiness waiter panicked")
+        .expect("SSE stream should become active before shutdown");
         let pid = std::process::id();
         std::process::Command::new("/bin/kill")
             .args(["-TERM", &pid.to_string()])

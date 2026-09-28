@@ -1,15 +1,11 @@
 use crate::model::vnstat::{Interface, VnstatData};
-use crate::task_registry::{TaskMessage, TaskRegistry};
-use crate::utils::timestamp;
-use anyhow::{Context, Result};
-use async_stream::stream;
-use axum::response::sse::Event;
-use cached::cached;
+use crate::service::live_stats::{self, LiveStatsMessage};
+use crate::service::vnstat_client::VnstatClient;
+use crate::task_registry::TaskRegistry;
+use anyhow::Result;
 use futures_util::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::warn;
 
 /// A typed vnstat query failure.
 ///
@@ -48,8 +44,7 @@ impl std::error::Error for VnstatError {
 /// live-traffic streaming.  Uses a single-entry, 60-second TTL cache for
 /// periodic data queries to avoid redundant subprocess invocations.
 pub struct VnstatService {
-    executable: String,
-    timeout: Duration,
+    client: VnstatClient,
 }
 
 impl VnstatService {
@@ -61,16 +56,14 @@ impl VnstatService {
     /// * `timeout_secs` - Timeout in seconds for vnstat subprocess execution.
     pub fn new(executable: impl Into<String>, timeout_secs: u64) -> Self {
         Self {
-            executable: executable.into(),
-            timeout: Duration::from_secs(timeout_secs),
+            client: VnstatClient::new(executable, timeout_secs),
         }
     }
 
     /// Fetches the full vnStat data JSON (cached for 60 seconds).
-    ///
-    /// Delegates to the cached free function [`fetch_vnstat_data_cached`].
     pub async fn fetch_vnstat_data(&self) -> Result<VnstatData, VnstatError> {
-        fetch_vnstat_data_cached(self.executable.clone(), self.timeout)
+        self.client
+            .fetch_data()
             .await
             .map_err(VnstatError::FetchFailed)
     }
@@ -103,13 +96,7 @@ impl VnstatService {
     /// Builds the command-line arguments required to start a live-traffic
     /// stream for a given interface.
     pub fn build_live_stream_command(&self, if_name: impl AsRef<str>) -> Result<Vec<String>> {
-        Ok(vec![
-            self.executable.clone(),
-            "-i".to_string(),
-            if_name.as_ref().to_string(),
-            "--json".to_string(),
-            "-l".to_string(),
-        ])
+        self.client.build_live_stream_command(if_name)
     }
 
     /// Returns a streaming response of Server-Sent Events (SSE) that yields
@@ -121,64 +108,10 @@ impl VnstatService {
         &self,
         registry: Arc<TaskRegistry>,
         if_name: String,
-    ) -> Pin<Box<dyn Stream<Item = Result<Event, String>> + Send>> {
-        let cmd = match self.build_live_stream_command(&if_name) {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                warn!("Failed to build live stream command: {}", e);
-                return Box::pin(futures_util::stream::once(async move {
-                    Err(format!("Failed to start live stream: {}", e))
-                }));
-            }
-        };
-
-        Box::pin(stream! {
-            let (mut receiver, _guard) = registry.subscribe(if_name.clone(), cmd).await;
-
-            // The channel closes when the process ends or all other
-            // subscribers leave; slow consumers have their messages dropped
-            // upstream instead of blocking the pipeline.
-            while let Some(message) = receiver.recv().await {
-                match message {
-                    TaskMessage::Data(data) => yield Ok(Event::default().data(data).id(timestamp::get_in_ms().to_string())),
-                    TaskMessage::Error(error) => yield Err(error),
-                    TaskMessage::Eof => break,
-                }
-            }
-        })
+    ) -> Pin<Box<dyn Stream<Item = Result<LiveStatsMessage, String>> + Send>> {
+        let command = self.build_live_stream_command(&if_name);
+        live_stats::stream_interface_live_stats(registry, if_name, command).await
     }
-}
-
-/// Fetches vnStat data with a single-entry, 60-second in-memory cache.
-///
-/// The cache key is the executable path and timeout (both constant at runtime).
-/// Repeated calls within the 60-second window return the cached result without
-/// re-invoking the subprocess. The TTL refreshes on every cache hit.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// * The vnStat subprocess fails to start or returns a non-zero exit code.
-/// * The command times out.
-/// * The stdout is not valid UTF-8.
-/// * The JSON payload cannot be deserialized into [`VnstatData`].
-#[cached(max_size = 1, ttl = 60, refresh = true)]
-async fn fetch_vnstat_data_cached(executable: String, timeout: Duration) -> Result<VnstatData> {
-    let output = tokio::time::timeout(timeout, async {
-        tokio::process::Command::new(executable)
-            .arg("--json")
-            .output()
-            .await
-            .context("failed to execute vnStat")
-    })
-    .await
-    .context("vnstat command timed out")?
-    .context("failed to execute vnStat")?;
-
-    let json_str =
-        String::from_utf8(output.stdout).context("failed to parse vnStat response as UTF-8")?;
-
-    serde_json::from_str(&json_str).context("failed to deserialize vnStat JSON response")
 }
 
 #[cfg(test)]
@@ -188,6 +121,7 @@ mod tests {
     use futures_util::StreamExt;
     use std::error::Error;
     use std::path::Path;
+    use std::time::Duration;
 
     fn service(script: &Path, timeout: u64) -> VnstatService {
         VnstatService::new(script.to_str().unwrap().to_string(), timeout)
@@ -214,6 +148,16 @@ mod tests {
         let s = service(&test_support::garbage_vnstat_script(), 5);
         let err = s.fetch_vnstat_data().await.unwrap_err();
         assert!(matches!(err, VnstatError::FetchFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_failure_when_command_exits_with_non_zero_status() {
+        let script =
+            test_support::write_script("#!/bin/sh\nprintf 'vnstat failed\n' >&2\nexit 7\n");
+        let s = service(&script, 5);
+        let err = s.fetch_vnstat_data().await.unwrap_err();
+        assert!(matches!(err, VnstatError::FetchFailed(_)));
+        assert!(err.to_string().contains("status"));
     }
 
     #[tokio::test]

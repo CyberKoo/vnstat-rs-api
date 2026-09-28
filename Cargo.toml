@@ -8,7 +8,6 @@ authors = ["Kotarou"]
 toml = "1.1"
 time = { version = "0.3", features = ["local-offset", "formatting"] }
 anyhow = "1.0"
-dashmap = "6.1"
 tokio-util = "0.7"
 serde_json = "1.0"
 cached = { version = "2.0", features = ["async", "async_tokio_rt_multi_thread"] }

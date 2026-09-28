@@ -1,4 +1,4 @@
-use crate::error_code::ErrorCode;
+use super::error_code::ErrorCode;
 use serde::Serialize;
 
 /// A standardized JSON response following the [JSend specification](https://github.com/omniti-labs/jsend).

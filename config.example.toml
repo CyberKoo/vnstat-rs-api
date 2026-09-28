@@ -1,0 +1,56 @@
+# vnstat-rs-api configuration file
+# Copy this file to config.toml and adjust values as needed.
+
+[server]
+# IP address to bind to.
+# Accepts "0.0.0.0" (all interfaces), "127.0.0.1" (localhost only),
+# or any valid IPv4/IPv6 address.
+# Default: "0.0.0.0"
+listen = "127.0.0.1"
+
+# HTTP server port.
+# Default: 3000
+port = 3000
+
+[vnstat]
+# Path to the vnStat executable.
+# Default: "/usr/bin/vnstat"
+executable = "/usr/bin/vnstat"
+
+[cors]
+# Master switch — enable CORS support.
+# Default: false
+enabled = false
+
+# Allowed origins. Empty = any origin (`*`) without credentials, or mirror
+# the request Origin when allow_credentials = true. Explicit entries must be
+# HTTP(S) scheme + host (optional port), or "null" for opaque origins; do not
+# put `*` in the list. Paths, queries, and fragments are not allowed.
+# Default: []
+# allowed_origins = [
+#     "http://localhost:5173",
+#     "https://my-dashboard.example.com",
+# ]
+
+# Allowed HTTP methods. Empty = any method.
+# Default: []
+# allowed_methods = ["GET", "POST", "OPTIONS"]
+
+# Allowed request headers. Empty = any header.
+# Default: []
+# allowed_headers = ["Content-Type", "Authorization", "X-Requested-With"]
+
+# Response headers exposed to the browser/client.
+# Empty = only CORS-safelisted headers exposed.
+# Default: []
+# expose_headers = ["X-RateLimit-Remaining", "X-Request-Id"]
+
+# Allow credentials (cookies, Authorization header).
+# When true and allowed_origins is empty, the request Origin is mirrored.
+# An explicit list cannot contain the wildcard `*`.
+# Default: false
+# allow_credentials = true
+
+# Optional max age (in seconds) for preflight response caching.
+# Default: None (browser default applies)
+# max_age = 3600

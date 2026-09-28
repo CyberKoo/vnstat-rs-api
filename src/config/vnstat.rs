@@ -1,6 +1,8 @@
 use super::traits::ConfigEntity;
 use anyhow::bail;
 use serde::Deserialize;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// Configuration for the vnStat statistics backend.
@@ -17,21 +19,33 @@ pub struct VnstatConfig {
 }
 
 impl ConfigEntity for VnstatConfig {
-    /// Validates that the vnStat executable path is non-empty and points to an
-    /// existing file on disk.
+    /// Validates that the timeout is positive and the path names a regular file.
+    /// On Unix, the file must also have an execute permission bit set.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The `executable` path is empty.
-    /// - The `executable` path does not exist on the filesystem.
+    /// - The timeout is zero.
+    /// - The `executable` path is not a regular file.
+    /// - On Unix, the file has no execute permission bits.
     fn validate(&self) -> anyhow::Result<()> {
         if self.executable.is_empty() {
             bail!("Vnstat executable is empty");
         }
 
-        if !Path::new(&self.executable).exists() {
-            bail!("Vnstat executable does not exist");
+        if self.query_timeout_secs == 0 {
+            bail!("Vnstat query timeout must be greater than zero");
+        }
+
+        let path = Path::new(&self.executable);
+        if !path.is_file() {
+            bail!("Vnstat executable is not an existing regular file");
+        }
+
+        #[cfg(unix)]
+        if path.metadata()?.permissions().mode() & 0o111 == 0 {
+            bail!("Vnstat executable is not executable");
         }
 
         Ok(())
@@ -88,6 +102,46 @@ mod tests {
         assert!(c.validate().is_err());
     }
 
+    #[test]
+    fn validate_rejects_zero_timeout() {
+        let c = VnstatConfig {
+            executable: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            query_timeout_secs: 0,
+        };
+        assert!(c.validate().unwrap_err().to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn validate_rejects_directory() {
+        let c = VnstatConfig {
+            executable: std::env::temp_dir().to_string_lossy().into_owned(),
+            query_timeout_secs: 5,
+        };
+        assert!(c.validate().unwrap_err().to_string().contains("executable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_rejects_file_without_execute_permission() {
+        let path = crate::test_support::write_temp_file("no-exec-vnstat", "#!/bin/sh\n");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let c = VnstatConfig {
+            executable: path.to_string_lossy().into_owned(),
+            query_timeout_secs: 5,
+        };
+        assert!(
+            c.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("not executable")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn validate_accepts_existing_file() {
         let tmp = crate::test_support::write_script("#!/bin/sh\nexit 0\n");

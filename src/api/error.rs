@@ -1,5 +1,5 @@
-use crate::error_code::ErrorCode;
-use crate::model::jsend::JsendResponse;
+use super::error_code::ErrorCode;
+use super::response::JsendResponse;
 use crate::service::vnstat_service::VnstatError;
 use axum::Json;
 use axum::extract::rejection::QueryRejection;
@@ -38,7 +38,7 @@ impl From<VnstatError> for ApiError {
                 ApiError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     ErrorCode::GetDataFailed,
-                    inner.to_string(),
+                    ErrorCode::GetDataFailed.message(),
                 )
             }
             VnstatError::InterfaceNotFound(name) => {
@@ -98,12 +98,7 @@ mod tests {
         let json = body_json(res).await;
         assert_eq!(json["status"], "error");
         assert_eq!(json["code"], 10000);
-        assert!(
-            json["message"]
-                .as_str()
-                .unwrap()
-                .contains("subprocess failed")
-        );
+        assert_eq!(json["message"], "Get data failed");
     }
 
     #[tokio::test]

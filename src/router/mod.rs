@@ -1,6 +1,6 @@
+use crate::api::error_code::ErrorCode;
+use crate::api::response::JsendResponse;
 use crate::config::link_speed::LinkSpeedConfig;
-use crate::error_code::ErrorCode;
-use crate::model::jsend::JsendResponse;
 use crate::service::vnstat_service::VnstatService;
 use crate::task_registry::TaskRegistry;
 use axum::extract::OriginalUri;
@@ -91,6 +91,43 @@ pub fn get_router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn built_application_serves_health_endpoint() {
+        let config: crate::config::AppConfig = toml::from_str("[server]\n").unwrap();
+        let script = crate::test_support::fake_vnstat_script();
+        let state = AppState {
+            vnstat: Arc::new(crate::service::vnstat_service::VnstatService::new(
+                script.to_str().unwrap(),
+                5,
+            )),
+            task_registry: Arc::new(crate::task_registry::TaskRegistry::new(4)),
+            link_speed: Default::default(),
+            shutdown_token: CancellationToken::new(),
+        };
+        let response = crate::app::build_app(&config, state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "success");
+        assert_eq!(json["data"], "ok");
+    }
 
     #[tokio::test]
     async fn home_returns_service_banner() {

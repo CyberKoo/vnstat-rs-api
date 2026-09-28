@@ -1,59 +1,22 @@
-use crate::api_error::ApiError;
-use crate::model::jsend::JsendResponse;
-use crate::model::vnstat::{
-    DayRecord, FiveMinuteRecord, HourRecord, Interface, MonthRecord, TopRecord, Total, Traffic,
-    Updated, YearRecord,
-};
-use crate::utils::sse::sse_with_default_headers;
-use async_stream::stream;
-use axum::extract::FromRequest;
-use axum::extract::{Path, Query, State};
-use axum::response::sse::{Event, KeepAlive};
-use axum::response::{Response, Sse};
+use crate::api::error::ApiError;
+use crate::api::response::JsendResponse;
+use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use futures_util::StreamExt;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use tracing::trace;
+use serde::Serialize;
 
 use super::AppState;
 
-// ── Query parameters ────────────────────────────────────────────────────────
+mod query;
+mod response;
+mod sse;
 
-/// Optional query parameters accepted by `GET /interfaces/{if_name}`.
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct InterfaceQuery {
-    /// Comma-separated list of time periods to include (e.g. "day,hour,month").
-    /// When absent all periods are returned.
-    periods: Option<String>,
-
-    /// Maximum number of records to return per period.
-    limit: Option<u32>,
-}
-
-/// Query extractor whose rejection is converted into a JSend [`ApiError`].
-///
-/// Wraps [`axum::extract::Query`] so that malformed query strings produce a
-/// JSend-formatted `400` response instead of axum's default plain-text body.
-#[derive(Debug)]
-struct ApiQuery<T>(pub T);
-
-impl<S, T> FromRequest<S> for ApiQuery<T>
-where
-    S: Send + Sync,
-    T: DeserializeOwned,
-{
-    type Rejection = ApiError;
-
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        let Query(value) = axum::extract::Query::<T>::from_request(req, state)
-            .await
-            .map_err(ApiError::from)?;
-        Ok(Self(value))
-    }
-}
+use query::{ApiQuery, InterfaceQuery, apply_traffic_filter};
+use response::{
+    AggregateStats, DayRecord, FiveMinuteRecord, HourRecord, Interface, InterfaceSummary,
+    MonthRecord, TopRecord, Total, Updated, YearRecord,
+};
+pub(super) use sse::get_interface_live_sse;
 
 // ── Router ──────────────────────────────────────────────────────────────────
 
@@ -99,47 +62,6 @@ pub fn interfaces_router() -> Router<AppState> {
         .route("/{if_name}/periods/total", get(get_interface_period_total))
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Filters `traffic` in-place according to the requested `periods` and `limit`.
-fn apply_traffic_filter(traffic: &mut Traffic, query: &InterfaceQuery) {
-    if let Some(ref periods_str) = query.periods {
-        let requested: Vec<&str> = periods_str.split(',').map(|s| s.trim()).collect();
-
-        if !requested.contains(&"day") {
-            traffic.day.clear();
-        }
-        if !(requested.contains(&"hour") || requested.contains(&"hours")) {
-            traffic.hour.clear();
-        }
-        if !(requested.contains(&"month") || requested.contains(&"months")) {
-            traffic.month.clear();
-        }
-        if !(requested.contains(&"year") || requested.contains(&"years")) {
-            traffic.year.clear();
-        }
-        if !(requested.contains(&"fiveminute") || requested.contains(&"5min")) {
-            traffic.fiveminute.clear();
-        }
-        if !requested.contains(&"top") {
-            traffic.top.clear();
-        }
-        if !requested.contains(&"total") {
-            traffic.total = Total { rx: 0, tx: 0 };
-        }
-    }
-
-    if let Some(limit) = query.limit {
-        let n = limit as usize;
-        traffic.day.truncate(n);
-        traffic.hour.truncate(n);
-        traffic.month.truncate(n);
-        traffic.year.truncate(n);
-        traffic.fiveminute.truncate(n);
-        traffic.top.truncate(n);
-    }
-}
-
 // ── Service-level handlers ──────────────────────────────────────────────────
 
 /// Handler for `GET /health`.
@@ -175,11 +97,8 @@ async fn get_all_interfaces_summary(
     State(state): State<AppState>,
 ) -> Result<Json<JsendResponse<Vec<InterfaceSummary>>>, ApiError> {
     let data = state.vnstat.fetch_vnstat_data().await?;
-    let summaries: Vec<InterfaceSummary> = data
-        .interfaces
-        .iter()
-        .map(InterfaceSummary::from_interface)
-        .collect();
+    let summaries: Vec<InterfaceSummary> =
+        data.interfaces.iter().map(InterfaceSummary::from).collect();
     Ok(Json(JsendResponse::success_with_data(summaries)))
 }
 
@@ -190,7 +109,7 @@ async fn get_interfaces_stats(
     State(state): State<AppState>,
 ) -> Result<Json<JsendResponse<AggregateStats>>, ApiError> {
     let data = state.vnstat.fetch_vnstat_data().await?;
-    let stats = AggregateStats::from_interfaces(&data.interfaces);
+    let stats = AggregateStats::from(data.interfaces.as_slice());
     Ok(Json(JsendResponse::success_with_data(stats)))
 }
 
@@ -208,7 +127,8 @@ async fn get_interface_data(
 ) -> Result<Json<JsendResponse<Interface>>, ApiError> {
     let mut data = state.vnstat.get_interface(&if_name).await?;
     apply_traffic_filter(&mut data.traffic, &query);
-    Ok(Json(JsendResponse::success_with_data(data)))
+    let response = Interface::from(data);
+    Ok(Json(JsendResponse::success_with_data(response)))
 }
 
 /// Handler for `GET /interfaces/{if_name}/summary`.
@@ -218,7 +138,7 @@ async fn get_interface_summary(
 ) -> Result<Json<JsendResponse<InterfaceSummary>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
     Ok(Json(JsendResponse::success_with_data(
-        InterfaceSummary::from_interface(&data),
+        InterfaceSummary::from(&data),
     )))
 }
 
@@ -228,7 +148,7 @@ async fn get_interface_updated(
     State(state): State<AppState>,
 ) -> Result<Json<JsendResponse<Updated>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
-    Ok(Json(JsendResponse::success_with_data(data.updated)))
+    Ok(Json(JsendResponse::success_with_data(data.updated.into())))
 }
 
 /// Reported link speed of an interface.
@@ -270,7 +190,9 @@ async fn get_interface_period_day(
     State(state): State<AppState>,
 ) -> Result<Json<JsendResponse<Vec<DayRecord>>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
-    Ok(Json(JsendResponse::success_with_data(data.traffic.day)))
+    Ok(Json(JsendResponse::success_with_data(
+        data.traffic.day.into_iter().map(Into::into).collect(),
+    )))
 }
 
 /// Handler for `GET /interfaces/{if_name}/periods/hour`.
@@ -279,7 +201,9 @@ async fn get_interface_period_hour(
     State(state): State<AppState>,
 ) -> Result<Json<JsendResponse<Vec<HourRecord>>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
-    Ok(Json(JsendResponse::success_with_data(data.traffic.hour)))
+    Ok(Json(JsendResponse::success_with_data(
+        data.traffic.hour.into_iter().map(Into::into).collect(),
+    )))
 }
 
 /// Handler for `GET /interfaces/{if_name}/periods/month`.
@@ -288,7 +212,9 @@ async fn get_interface_period_month(
     State(state): State<AppState>,
 ) -> Result<Json<JsendResponse<Vec<MonthRecord>>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
-    Ok(Json(JsendResponse::success_with_data(data.traffic.month)))
+    Ok(Json(JsendResponse::success_with_data(
+        data.traffic.month.into_iter().map(Into::into).collect(),
+    )))
 }
 
 /// Handler for `GET /interfaces/{if_name}/periods/year`.
@@ -297,7 +223,9 @@ async fn get_interface_period_year(
     State(state): State<AppState>,
 ) -> Result<Json<JsendResponse<Vec<YearRecord>>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
-    Ok(Json(JsendResponse::success_with_data(data.traffic.year)))
+    Ok(Json(JsendResponse::success_with_data(
+        data.traffic.year.into_iter().map(Into::into).collect(),
+    )))
 }
 
 /// Handler for `GET /interfaces/{if_name}/periods/fiveminute`.
@@ -307,7 +235,11 @@ async fn get_interface_period_fiveminute(
 ) -> Result<Json<JsendResponse<Vec<FiveMinuteRecord>>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
     Ok(Json(JsendResponse::success_with_data(
-        data.traffic.fiveminute,
+        data.traffic
+            .fiveminute
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     )))
 }
 
@@ -317,7 +249,9 @@ async fn get_interface_period_top(
     State(state): State<AppState>,
 ) -> Result<Json<JsendResponse<Vec<TopRecord>>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
-    Ok(Json(JsendResponse::success_with_data(data.traffic.top)))
+    Ok(Json(JsendResponse::success_with_data(
+        data.traffic.top.into_iter().map(Into::into).collect(),
+    )))
 }
 
 /// Handler for `GET /interfaces/{if_name}/periods/total`.
@@ -326,123 +260,15 @@ async fn get_interface_period_total(
     State(state): State<AppState>,
 ) -> Result<Json<JsendResponse<Total>>, ApiError> {
     let data = state.vnstat.get_interface(&if_name).await?;
-    Ok(Json(JsendResponse::success_with_data(data.traffic.total)))
-}
-
-// ── Response types ──────────────────────────────────────────────────────────
-
-/// Compact summary of a single interface.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct InterfaceSummary {
-    /// The system-level interface name (e.g. `eth0`).
-    name: String,
-    /// A human-readable alias (may be empty).
-    alias: String,
-    /// Cumulative traffic since the interface was created.
-    total: Total,
-    /// Bytes received today (from the most recent day record).
-    today_rx: u64,
-    /// Bytes transmitted today (from the most recent day record).
-    today_tx: u64,
-    /// Unix epoch timestamp (seconds) of the most recent update.
-    updated_timestamp: i64,
-}
-
-impl InterfaceSummary {
-    fn from_interface(iface: &Interface) -> Self {
-        let today = iface.traffic.day.last();
-        Self {
-            name: iface.name.clone(),
-            alias: iface.alias.clone(),
-            total: iface.traffic.total.clone(),
-            today_rx: today.map(|d| d.rx).unwrap_or(0),
-            today_tx: today.map(|d| d.tx).unwrap_or(0),
-            updated_timestamp: iface.updated.timestamp,
-        }
-    }
-}
-
-/// Aggregate traffic statistics across all monitored interfaces.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AggregateStats {
-    /// Number of interfaces tracked by vnstat.
-    total_interfaces: usize,
-    /// Cumulative bytes received across all interfaces.
-    total_rx: u64,
-    /// Cumulative bytes transmitted across all interfaces.
-    total_tx: u64,
-}
-
-impl AggregateStats {
-    fn from_interfaces(interfaces: &[Interface]) -> Self {
-        let total_rx: u64 = interfaces.iter().map(|i| i.traffic.total.rx).sum();
-        let total_tx: u64 = interfaces.iter().map(|i| i.traffic.total.tx).sum();
-        Self {
-            total_interfaces: interfaces.len(),
-            total_rx,
-            total_tx,
-        }
-    }
-}
-
-// ── SSE live stream ─────────────────────────────────────────────────────────
-
-/// Handler for `GET /interfaces/{if_name}/live`.
-///
-/// Opens a Server-Sent Events (SSE) stream that pushes live traffic
-/// updates for a single network interface.  The stream is kept alive
-/// with periodic keep-alive pings.
-///
-/// When the server begins a graceful shutdown, the stream emits a final
-/// `shutdown` event and closes, so the long-lived connection does not block
-/// the shutdown drain.
-///
-/// # Returns
-///
-/// An SSE response with `Cache-Control`, `Connection`, and
-/// `X-Accel-Buffering` headers set for optimal streaming behaviour.
-pub async fn get_interface_live_sse(
-    Path(if_name): Path<String>,
-    State(state): State<AppState>,
-) -> Response {
-    trace!("SSE stream for interface `{}` connected.", if_name);
-
-    let stream = state
-        .vnstat
-        .stream_interface_live_stats(state.task_registry, if_name)
-        .await;
-
-    // End the stream when graceful shutdown begins (emitting a farewell
-    // event first), so the server can drain this connection instead of
-    // waiting for the client to disconnect.
-    let shutdown_token = state.shutdown_token.clone();
-    let stream = stream! {
-        let mut stream = stream;
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown_token.cancelled() => {
-                    yield Ok(Event::default().event("shutdown").data("server is shutting down"));
-                    break;
-                }
-                item = stream.next() => match item {
-                    Some(item) => yield item,
-                    None => break,
-                },
-            }
-        }
-    };
-
-    let sse = Sse::new(stream).keep_alive(KeepAlive::default());
-
-    sse_with_default_headers(sse)
+    Ok(Json(JsendResponse::success_with_data(
+        data.traffic.total.into(),
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::vnstat::{Total as VnstatTotal, Traffic};
     use crate::test_support;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -794,6 +620,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_interface_live_sse_returns_jsend_404() {
+        let response = get_interface_live_sse(Path("eth9".into()), state()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            response
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("application/json")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "fail");
+        assert_eq!(json["code"], 10001);
+        assert_eq!(json["message"], "no such interface: eth9");
+    }
+
+    #[tokio::test]
     async fn live_sse_streams_events() {
         use http_body_util::BodyExt;
 
@@ -848,10 +696,10 @@ mod tests {
                 .expect("stream should end within timeout after shutdown");
             match frame {
                 Some(Ok(frame)) => {
-                    if let Ok(bytes) = frame.into_data() {
-                        if String::from_utf8_lossy(&bytes).contains("shutting down") {
-                            farewell = true;
-                        }
+                    if let Ok(bytes) = frame.into_data()
+                        && String::from_utf8_lossy(&bytes).contains("shutting down")
+                    {
+                        farewell = true;
                     }
                 }
                 Some(Err(_)) | None => break,
@@ -875,7 +723,7 @@ mod tests {
         assert!(traffic.fiveminute.is_empty());
         assert!(traffic.top.is_empty());
         // `total` is zeroed (not omitted) when not requested.
-        assert_eq!(traffic.total, Total { rx: 0, tx: 0 });
+        assert_eq!(traffic.total, VnstatTotal { rx: 0, tx: 0 });
     }
 
     #[test]
@@ -888,7 +736,7 @@ mod tests {
         apply_traffic_filter(&mut traffic, &query);
         assert_eq!(
             traffic.total,
-            Total {
+            VnstatTotal {
                 rx: 123456789,
                 tx: 987654321
             }
@@ -918,7 +766,7 @@ mod tests {
         assert_eq!(traffic.day.len(), 2);
         assert_eq!(
             traffic.total,
-            Total {
+            VnstatTotal {
                 rx: 123456789,
                 tx: 987654321
             }

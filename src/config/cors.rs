@@ -1,8 +1,8 @@
 use super::traits::ConfigEntity;
+use anyhow::bail;
+use axum::http::{HeaderName, Method, Uri};
 use serde::Deserialize;
-use tower_http::cors::{
-    AllowCredentials, AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders,
-};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Configuration for Cross-Origin Resource Sharing (CORS).
 ///
@@ -20,6 +20,9 @@ pub struct CorsConfig {
     /// If empty the behaviour is controlled by the `allow_credentials` flag:
     /// * With credentials — `mirror_request()` (echoes the request origin).
     /// * Without credentials — `any()` (wildcard `*`).
+    ///
+    /// The explicit list accepts HTTP(S) origins and the opaque origin `null`.
+    /// Use an empty list, not `*`, for the wildcard/mirror behaviour.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
 
@@ -72,98 +75,99 @@ impl Default for CorsConfig {
     }
 }
 
-impl ConfigEntity for CorsConfig {}
-
-impl CorsConfig {
-    /// Builds a [`CorsLayer`] from this configuration.
-    ///
-    /// Translates the values in this config into the corresponding
-    /// `tower-http` CORS middleware. When `allowed_origins` is empty the
-    /// layer uses `AllowOrigin::any()` (or `AllowOrigin::mirror_request()` if
-    /// credentials are enabled, since the CORS spec forbids a wildcard origin
-    /// with credentials). Invalid origin/method/header strings are skipped.
-    pub fn to_layer(&self) -> CorsLayer {
-        let mut layer = CorsLayer::new();
-
-        // --- allowed_origins ---
-        if self.allowed_origins.is_empty() {
-            // No specific origins → allow all.
-            // NOTE: If credentials are also enabled, wildcard won't work per CORS spec;
-            // in that case we use mirror_request which echoes back the request's Origin.
-            if self.allow_credentials {
-                layer = layer.allow_origin(AllowOrigin::mirror_request());
-            } else {
-                layer = layer.allow_origin(AllowOrigin::any());
+impl ConfigEntity for CorsConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        for (index, origin) in self.allowed_origins.iter().enumerate() {
+            if !is_valid_origin(origin) {
+                bail!("cors.allowed_origins[{index}] is not a valid HTTP(S) origin: {origin:?}");
             }
-        } else {
-            let origins: Vec<_> = self
-                .allowed_origins
-                .iter()
-                .filter_map(|o| axum::http::HeaderValue::from_str(o).ok())
-                .collect();
-            layer = layer.allow_origin(AllowOrigin::list(origins));
         }
-
-        // --- allowed_methods ---
-        if self.allowed_methods.is_empty() {
-            // Wildcards are invalid with credentials; mirror the request
-            // method instead (tower-http panics on the combination).
-            if self.allow_credentials {
-                layer = layer.allow_methods(AllowMethods::mirror_request());
-            } else {
-                layer = layer.allow_methods(AllowMethods::any());
+        for (index, method) in self.allowed_methods.iter().enumerate() {
+            if Method::from_bytes(method.as_bytes()).is_err() {
+                bail!("cors.allowed_methods[{index}] is not a valid HTTP method: {method:?}");
             }
-        } else {
-            let methods: Vec<_> = self
-                .allowed_methods
-                .iter()
-                .filter_map(|m: &String| axum::http::Method::from_bytes(m.as_bytes()).ok())
-                .collect();
-            layer = layer.allow_methods(AllowMethods::list(methods));
         }
-
-        // --- allowed_headers ---
-        if self.allowed_headers.is_empty() {
-            // Same credential constraint as methods above.
-            if self.allow_credentials {
-                layer = layer.allow_headers(AllowHeaders::mirror_request());
-            } else {
-                layer = layer.allow_headers(AllowHeaders::any());
+        for (index, header) in self.allowed_headers.iter().enumerate() {
+            if HeaderName::from_bytes(header.as_bytes()).is_err() {
+                bail!("cors.allowed_headers[{index}] is not a valid header name: {header:?}");
             }
-        } else {
-            let headers: Vec<_> = self
-                .allowed_headers
-                .iter()
-                .filter_map(|h: &String| axum::http::HeaderName::from_bytes(h.as_bytes()).ok())
-                .collect();
-            layer = layer.allow_headers(AllowHeaders::list(headers));
         }
-
-        // --- expose_headers ---
-        if !self.expose_headers.is_empty() {
-            let headers: Vec<_> = self
-                .expose_headers
-                .iter()
-                .filter_map(|h: &String| axum::http::HeaderName::from_bytes(h.as_bytes()).ok())
-                .collect();
-            layer = layer.expose_headers(ExposeHeaders::list(headers));
+        for (index, header) in self.expose_headers.iter().enumerate() {
+            if HeaderName::from_bytes(header.as_bytes()).is_err() {
+                bail!("cors.expose_headers[{index}] is not a valid header name: {header:?}");
+            }
         }
-
-        // --- allow_credentials ---
-        if self.allow_credentials {
-            layer = layer.allow_credentials(AllowCredentials::yes());
-        }
-
-        // --- max_age ---
-        if let Some(max_age) = self.max_age {
-            layer = layer.max_age(std::time::Duration::from_secs(max_age));
-        }
-
-        layer
+        Ok(())
     }
 }
 
-/// Returns the default value for the `enabled` field (`true`).
+// An Origin is a serialized scheme + authority, not an arbitrary HTTP header
+// value or a full URL (which could include a path, query, or fragment).
+fn is_valid_origin(origin: &str) -> bool {
+    if origin == "null" {
+        return true;
+    }
+
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@', '\\'])
+        || origin.parse::<Uri>().is_err()
+    {
+        return false;
+    }
+
+    let (host, port) = if let Some(ipv6) = authority.strip_prefix('[') {
+        let Some((address, suffix)) = ipv6.split_once(']') else {
+            return false;
+        };
+        if address.parse::<Ipv6Addr>().is_err() {
+            return false;
+        }
+        if suffix.is_empty() {
+            return true;
+        }
+        let Some(port) = suffix.strip_prefix(':') else {
+            return false;
+        };
+        return valid_port(port);
+    } else if let Some((host, port)) = authority.split_once(':') {
+        (host, Some(port))
+    } else {
+        (authority, None)
+    };
+
+    let host = host.strip_suffix('.').unwrap_or(host);
+    !host.is_empty()
+        && (!host.bytes().all(|c| c.is_ascii_digit() || c == b'.')
+            || host.parse::<Ipv4Addr>().is_ok())
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        })
+        && port.is_none_or(valid_port)
+}
+
+fn valid_port(port: &str) -> bool {
+    !port.is_empty() && port.bytes().all(|c| c.is_ascii_digit()) && port.parse::<u16>().is_ok()
+}
+
+/// Returns the default value for the `enabled` field (`false`).
 fn default_enabled() -> bool {
     false
 }
@@ -178,7 +182,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn router_for(cfg: CorsConfig) -> Router {
-        Router::new().layer(cfg.to_layer())
+        Router::new().layer(crate::app::cors_layer(&cfg))
     }
 
     fn simple_request(origin: Option<&str>) -> Request<Body> {

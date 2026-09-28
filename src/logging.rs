@@ -47,8 +47,8 @@ pub fn init(debug: bool) -> Result<()> {
         .unwrap_or_else(|e| {
             // A subscriber is already installed (e.g. tests running multiple
             // server instances in one process): keep the existing one and
-            // continue instead of panicking.
-            tracing::warn!("tracing subscriber already set: {}", e);
+            // continue quietly.
+            tracing::debug!("tracing subscriber already set: {}", e);
         });
 
     Ok(())

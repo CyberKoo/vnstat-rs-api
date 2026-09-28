@@ -26,11 +26,10 @@ const VERSION: &str = if env!("GIT_BRANCH").is_empty() || env!("GIT_COMMIT").is_
 #[command(author = env!("CARGO_PKG_AUTHORS"))]
 #[command(version = VERSION)]
 #[command(
-    about = "A RESTful Web API wrapper for vnstat's network traffic monitoring.",
-    long_about = "vnstat-rs-api: A Rust-based tool that converts vnstat's CLI into a RESTful API. \
-    Provides endpoints to query network interfaces, traffic statistics (e.g., daily/monthly usage), \
-    and updates via HTTP requests. Ideal for integration into monitoring systems, dashboards, \
-    or automated scripts. Built for performance, safety, and extensibility in Rust."
+    about = "A REST API for querying vnstat network traffic data.",
+    long_about = "vnstat-rs-api exposes vnstat network traffic data through a REST API. \
+    It lets you query network interfaces and traffic statistics, including daily and monthly usage. \
+    The API can be used with monitoring tools, dashboards, and scripts."
 )]
 pub struct Args {
     #[arg(short, long, default_value = "config.toml", help = "Config file")]

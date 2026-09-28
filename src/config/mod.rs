@@ -69,6 +69,7 @@ impl ConfigEntity for AppConfig {
     fn validate(&self) -> Result<()> {
         self.server.validate()?;
         self.vnstat.validate()?;
+        self.cors.validate()?;
         self.sse.validate()?;
         self.link_speed.validate()?;
 
@@ -135,6 +136,7 @@ mod tests {
         let _ = fs::remove_file(&p);
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_config_finalizes_and_validates() {
         let script = crate::test_support::write_script("#!/bin/sh\nexit 0\n");
@@ -167,6 +169,83 @@ mod tests {
         assert_eq!(cfg.link_speed.get("eth0").rx, 1000);
         assert_eq!(cfg.link_speed.get("eth0").tx, 1000);
         let _ = fs::remove_file(&p);
+    }
+
+    fn load_cors_setting(setting: &str) -> Result<AppConfig> {
+        let executable = toml::Value::String(
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let content = format!(
+            "[server]\n\n[vnstat]\nexecutable = {executable}\n\n[cors]\nenabled = true\n{setting}\n"
+        );
+        let path = crate::test_support::write_temp_file("cors-config", &content);
+        let result = load_config(path.to_str().unwrap());
+        fs::remove_file(path).unwrap();
+        result
+    }
+
+    #[test]
+    fn load_config_rejects_invalid_cors_origins() {
+        for origin in [
+            "*",
+            "null/",
+            "not-an-origin",
+            "ftp://example.com",
+            "http://",
+            "https://user@example.com",
+            "http://example.com/",
+            "https://example.com/path",
+            "https://example.com?query",
+            "https://example.com#fragment",
+            "https://example.com:bad",
+            "https://example.com:65536",
+            "http://[not-ipv6]",
+            "http://bad_host",
+            "http://999.999.999.999",
+        ] {
+            let setting = format!("allowed_origins = [{}]", toml::Value::String(origin.into()));
+            let err = load_cors_setting(&setting).unwrap_err();
+            assert!(
+                err.to_string().contains("cors.allowed_origins[0]"),
+                "{origin:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_config_accepts_http_origins_and_null() {
+        let cfg = load_cors_setting(
+            "allowed_origins = [\"http://localhost:5173\", \"https://example.com\", \"http://127.0.0.1\", \"http://[::1]:8080\", \"null\"]",
+        )
+        .unwrap();
+        assert_eq!(cfg.cors.allowed_origins.len(), 5);
+    }
+
+    #[test]
+    fn load_config_rejects_invalid_cors_methods_and_headers() {
+        for (setting, field) in [
+            (
+                "allowed_methods = [\"GET\", \"NOT A METHOD\"]",
+                "cors.allowed_methods[1]",
+            ),
+            ("allowed_methods = [\"\"]", "cors.allowed_methods[0]"),
+            (
+                "allowed_headers = [\"valid\", \"bad header\"]",
+                "cors.allowed_headers[1]",
+            ),
+            ("allowed_headers = [\"\"]", "cors.allowed_headers[0]"),
+            (
+                "expose_headers = [\"valid\", \"bad header\"]",
+                "cors.expose_headers[1]",
+            ),
+            ("expose_headers = [\"\"]", "cors.expose_headers[0]"),
+        ] {
+            let err = load_cors_setting(setting).unwrap_err();
+            assert!(err.to_string().contains(field), "{setting}: {err}");
+        }
     }
 
     #[test]
