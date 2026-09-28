@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-09-28
 
 ### Added
 
@@ -12,6 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured interface link speed (RX/TX in Mbps). Values are configured
   per interface via `[link_speed.<if_name>]` tables (`rx` / `tx`) and
   default to `1000` Mbps for interfaces without an entry.
+- Added `config.example.toml` with annotated server, vnStat, and CORS settings.
+
+### Changed
+
+- Development builds now show a `-dev` suffix in the root service banner and
+  include the Git commit identifier in `--version`; release builds retain the
+  plain package version.
+- Reorganized API responses and errors, routing, configuration, services,
+  and task registry into focused modules; extracted application construction
+  and the vnStat client without changing the existing API routes.
+- Removed the unused `dashmap` dependency.
+
+### Tests
+
+- SSE graceful-shutdown tests now wait for a real event before initiating
+  shutdown instead of relying on a fixed delay.
 
 ## [1.1.1] - 2026-08-02
 
