@@ -56,12 +56,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let config = config::load_config(&args.config).context("Failed to load configuration")?;
     info!("Configuration loaded successfully");
 
+    let task_registry = Arc::new(task_registry::TaskRegistry::new(
+        config.sse.subscriber_buffer,
+    ));
     let vnstat = Arc::new(service::vnstat_service::VnstatService::new(
         config.vnstat.executable.clone(),
         config.vnstat.query_timeout_secs,
-    ));
-    let task_registry = Arc::new(task_registry::TaskRegistry::new(
-        config.sse.subscriber_buffer,
+        task_registry,
     ));
 
     // Cancelled when a shutdown signal arrives; long-lived SSE streams end
@@ -70,7 +71,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
 
     let app_state = AppState {
         vnstat,
-        task_registry,
         link_speed: config.link_speed.clone(),
         shutdown_token: shutdown_token.clone(),
     };

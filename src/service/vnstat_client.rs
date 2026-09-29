@@ -34,7 +34,9 @@ impl VnstatClient {
     }
 }
 
-#[cached(max_size = 1, ttl = 60, refresh = true)]
+// `refresh` is omitted on purpose. In `cached` 2.0 it renews the TTL on every
+// hit, so a client polling inside the window would never observe new vnStat data.
+#[cached(max_size = 1, ttl = 60)]
 async fn fetch_vnstat_data_cached(executable: String, timeout: Duration) -> Result<VnstatData> {
     let output = tokio::time::timeout(timeout, async {
         tokio::process::Command::new(executable)

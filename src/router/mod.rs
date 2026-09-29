@@ -2,7 +2,6 @@ use crate::api::error_code::ErrorCode;
 use crate::api::response::JsendResponse;
 use crate::config::link_speed::LinkSpeedConfig;
 use crate::service::vnstat_service::VnstatService;
-use crate::task_registry::TaskRegistry;
 use axum::extract::OriginalUri;
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -15,17 +14,13 @@ mod vnstat;
 /// Application-wide shared state injected into every Axum handler via
 /// [axum::extract::State].
 ///
-/// Holds the long-lived services that handlers need to query vnstat data
-/// and manage background tasks.
+/// Holds the long-lived dependencies that handlers need to query vnstat
+/// data, report link speed, and end live streams on shutdown.
 #[derive(Clone)]
 pub struct AppState {
     /// Service for fetching and streaming network statistics from the
     /// underlying `vnstat` daemon.
     pub vnstat: Arc<VnstatService>,
-
-    /// Registry of named subprocesses whose output is broadcast to
-    /// multiple subscribers (used for SSE live streams).
-    pub task_registry: Arc<TaskRegistry>,
 
     /// Configured interface link speed (RX/TX in Mbps) reported by the
     /// link-speed endpoint.
@@ -105,8 +100,8 @@ mod tests {
             vnstat: Arc::new(crate::service::vnstat_service::VnstatService::new(
                 script.to_str().unwrap(),
                 5,
+                Arc::new(crate::task_registry::TaskRegistry::new(4)),
             )),
-            task_registry: Arc::new(crate::task_registry::TaskRegistry::new(4)),
             link_speed: Default::default(),
             shutdown_token: CancellationToken::new(),
         };

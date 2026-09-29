@@ -109,8 +109,11 @@ mod tests {
     fn builds_application_with_default_configuration() {
         let config: AppConfig = toml::from_str("[server]\n").unwrap();
         let state = AppState {
-            vnstat: Arc::new(VnstatService::new("/bin/false", 1)),
-            task_registry: Arc::new(TaskRegistry::new(4)),
+            vnstat: Arc::new(VnstatService::new(
+                "/bin/false",
+                1,
+                Arc::new(TaskRegistry::new(4)),
+            )),
             link_speed: Default::default(),
             shutdown_token: CancellationToken::new(),
         };

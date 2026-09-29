@@ -282,8 +282,8 @@ mod tests {
             vnstat: Arc::new(crate::service::vnstat_service::VnstatService::new(
                 script.to_str().unwrap().to_string(),
                 5,
+                Arc::new(crate::task_registry::TaskRegistry::new(4)),
             )),
-            task_registry: Arc::new(crate::task_registry::TaskRegistry::new(4)),
             link_speed: Default::default(),
             shutdown_token: CancellationToken::new(),
         }
@@ -344,8 +344,8 @@ mod tests {
             vnstat: Arc::new(crate::service::vnstat_service::VnstatService::new(
                 script.to_str().unwrap().to_string(),
                 5,
+                Arc::new(crate::task_registry::TaskRegistry::new(4)),
             )),
-            task_registry: Arc::new(crate::task_registry::TaskRegistry::new(4)),
             link_speed: Default::default(),
             shutdown_token: CancellationToken::new(),
         };

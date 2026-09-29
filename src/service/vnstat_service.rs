@@ -1,11 +1,13 @@
+use super::live_stats;
+use super::vnstat_client::VnstatClient;
 use crate::model::vnstat::{Interface, VnstatData};
-use crate::service::live_stats::{self, LiveStatsMessage};
-use crate::service::vnstat_client::VnstatClient;
 use crate::task_registry::TaskRegistry;
 use anyhow::Result;
 use futures_util::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
+
+pub use super::live_stats::LiveStatsMessage;
 
 /// A typed vnstat query failure.
 ///
@@ -45,6 +47,7 @@ impl std::error::Error for VnstatError {
 /// periodic data queries to avoid redundant subprocess invocations.
 pub struct VnstatService {
     client: VnstatClient,
+    registry: Arc<TaskRegistry>,
 }
 
 impl VnstatService {
@@ -54,9 +57,15 @@ impl VnstatService {
     ///
     /// * `executable` - Path or name of the `vnstat` binary.
     /// * `timeout_secs` - Timeout in seconds for vnstat subprocess execution.
-    pub fn new(executable: impl Into<String>, timeout_secs: u64) -> Self {
+    /// * `registry` - Shared subprocess registry used by live-traffic streams.
+    pub fn new(
+        executable: impl Into<String>,
+        timeout_secs: u64,
+        registry: Arc<TaskRegistry>,
+    ) -> Self {
         Self {
             client: VnstatClient::new(executable, timeout_secs),
+            registry,
         }
     }
 
@@ -95,22 +104,21 @@ impl VnstatService {
 
     /// Builds the command-line arguments required to start a live-traffic
     /// stream for a given interface.
-    pub fn build_live_stream_command(&self, if_name: impl AsRef<str>) -> Result<Vec<String>> {
+    fn build_live_stream_command(&self, if_name: impl AsRef<str>) -> Result<Vec<String>> {
         self.client.build_live_stream_command(if_name)
     }
 
-    /// Returns a streaming response of Server-Sent Events (SSE) that yields
-    /// live traffic statistics for the requested interface.
+    /// Streams live traffic statistics for the requested interface.
     ///
-    /// If the client cannot keep up with the stream, messages are dropped for
-    /// that client instead of applying backpressure to the vnstat subprocess.
+    /// Each item is one line of vnStat output, or an error string when the
+    /// subprocess fails. A slow consumer drops messages instead of applying
+    /// backpressure to the vnstat subprocess.
     pub async fn stream_interface_live_stats(
         &self,
-        registry: Arc<TaskRegistry>,
         if_name: String,
     ) -> Pin<Box<dyn Stream<Item = Result<LiveStatsMessage, String>> + Send>> {
         let command = self.build_live_stream_command(&if_name);
-        live_stats::stream_interface_live_stats(registry, if_name, command).await
+        live_stats::stream_interface_live_stats(Arc::clone(&self.registry), if_name, command).await
     }
 }
 
@@ -124,7 +132,11 @@ mod tests {
     use std::time::Duration;
 
     fn service(script: &Path, timeout: u64) -> VnstatService {
-        VnstatService::new(script.to_str().unwrap().to_string(), timeout)
+        VnstatService::new(
+            script.to_str().unwrap().to_string(),
+            timeout,
+            Arc::new(TaskRegistry::new(4)),
+        )
     }
 
     #[tokio::test]
@@ -201,8 +213,7 @@ mod tests {
     #[tokio::test]
     async fn streams_live_events() {
         let s = service(&test_support::fake_vnstat_script(), 5);
-        let registry = Arc::new(TaskRegistry::new(4));
-        let mut stream = s.stream_interface_live_stats(registry, "eth0".into()).await;
+        let mut stream = s.stream_interface_live_stats("eth0".into()).await;
 
         // Collect three live events; each must arrive quickly and be an Ok event.
         for _ in 0..3 {

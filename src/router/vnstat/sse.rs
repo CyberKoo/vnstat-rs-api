@@ -1,5 +1,5 @@
 use crate::api::error::ApiError;
-use crate::service::live_stats::LiveStatsMessage;
+use crate::service::vnstat_service::LiveStatsMessage;
 use crate::utils::sse::sse_with_default_headers;
 use async_stream::stream;
 use axum::extract::{Path, State};
@@ -21,10 +21,7 @@ pub async fn get_interface_live_sse(
 
     trace!("SSE stream for interface `{}` connected.", if_name);
 
-    let stream = state
-        .vnstat
-        .stream_interface_live_stats(state.task_registry, if_name)
-        .await;
+    let stream = state.vnstat.stream_interface_live_stats(if_name).await;
 
     // End the stream when graceful shutdown begins so the server can drain
     // long-lived connections instead of waiting for clients to disconnect.
